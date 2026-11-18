@@ -19,5 +19,6 @@ docker run -d --name "$NET-owui" --network "$NET" --network-alias owui --tmpfs /
   -e ENABLE_API_KEYS=true -e WEBUI_SECRET_KEY=integration-test -e ENABLE_TITLE_GENERATION=false \
   -e ENABLE_TAGS_GENERATION=true -e ENABLE_FOLLOW_UP_GENERATION=true -e ENABLE_AUTOCOMPLETE_GENERATION=true \
   -e ENABLE_SEARCH_QUERY_GENERATION=true -e ENABLE_RETRIEVAL_QUERY_GENERATION=true \
+  -e ENABLE_RAG_HYBRID_SEARCH=true -e RAG_TOP_K=3 \
   "$IMAGE" >/dev/null
 docker run --rm --network "$NET" -e "IMAGE=$IMAGE" -v "$PWD:/repo" node-kit-tests bash tests/integration-run.sh

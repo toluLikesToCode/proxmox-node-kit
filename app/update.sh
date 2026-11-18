@@ -11,14 +11,19 @@ KEEP_BACKUPS=${KEEP_BACKUPS:-5}
 BRANCH=${BRANCH:-live}
 KEY_FILE=${KEY_FILE:-/etc/open-webui-sync.env}
 STATE_DIR=${STATE_DIR:-/var/lib/open-webui-update}
+KB_KEY=${KB_KEY:-/etc/advisor-kb-deploy-key}
+KB_ROOT=${KB_ROOT:-/var/lib/open-webui-kb}
+export KB_KEY KB_ROOT
 COMPOSE=(docker compose -f "$REPO_DIR/app/compose.yaml")
 
 # The advisor config is not part of the deploy: a failed sync is logged, never rolled back.
-# Fingerprint = advisor files + key file; empty without a key. The stamp holds the fingerprint of
-# the last successful sync, so the timer retries a failed sync and picks up a key added later.
+# Fingerprint = advisor files + key file + the pulled knowledge manifest; empty without a key. The
+# stamp holds the fingerprint of the last successful sync, so the timer retries a failed sync and
+# picks up a key added later or new knowledge.
 fingerprint() {
   [ -s "$KEY_FILE" ] || return 0
-  { find "$REPO_DIR/app/advisor" -type f | sort | xargs sha256sum | sed "s# $REPO_DIR/# #"; sha256sum < "$KEY_FILE"; } | sha256sum
+  { find "$REPO_DIR/app/advisor" -type f | sort | xargs sha256sum | sed "s# $REPO_DIR/# #"; sha256sum < "$KEY_FILE"
+    sha256sum < "$KB_ROOT/current/MANIFEST.json" 2>/dev/null || true; } | sha256sum
 }
 sync_advisor() {
   local fp; fp=$(fingerprint)
@@ -29,7 +34,14 @@ sync_advisor() {
   fi
 }
 
+# The knowledge comes from the advisor-kb repo, not from this one. A failed pull keeps the previous knowledge.
+pull_kb() {
+  [ -s "$KB_KEY" ] || return 0
+  bash "$REPO_DIR/app/advisor/kb-pull.sh" || echo "Knowledge pull failed; keeping the previous knowledge." >&2
+}
+
 cd "$REPO_DIR"
+pull_kb
 git fetch -q origin "$BRANCH"
 OLD=$(git rev-parse HEAD)
 NEW=$(git rev-parse "origin/$BRANCH")

@@ -10,7 +10,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 G=(git -c user.name=t -c user.email=t@t)
 
 # ---------- static ----------
-check "shellcheck" shellcheck host/setup.sh app/*.sh app/advisor/sync.sh tests/run.sh tests/docker.sh tests/integration.sh tests/integration-run.sh
+check "shellcheck" shellcheck -x -P SCRIPTDIR host/setup.sh app/*.sh app/advisor/*.sh tests/run.sh tests/docker.sh tests/integration.sh tests/integration-run.sh
 check "compose.yaml pins an image tag" python3 -c '
 import yaml,sys
 img=yaml.safe_load(open("app/compose.yaml"))["services"]["open-webui"]["image"]
@@ -47,8 +47,9 @@ check "model.json pins the base model, native function calling and a token cap" 
   '.id == "homelab-advisor" and .base_model_id == "deepseek/deepseek-v4.1-flash-1017" and .params.function_calling == "native" and (.params.max_tokens | type == "number" and . > 0)' "$M"
 check "model.json asks OpenRouter to deny providers that keep or train on prompts" quiet jq -e '.params.custom_params.provider.data_collection == "deny"' "$M"
 check "system prompt is under 1,500 tokens (chars/4)" test "$(( $(wc -c < "$SP") / 4 ))" -lt 1500
-check "system prompt has the retrieval rule" grep -q 'Before answering a question about this homelab, call list_knowledge, then query_knowledge_files' "$SP"
-check "system prompt has a Knowledge index section" grep -q '^# Knowledge index' "$SP"
+check "system prompt has the retrieval rule" grep -q 'Before answering anything about this homelab, call list_knowledge once, then query_knowledge_files' "$SP"
+check "system prompt names both knowledge bases" bash -c 'grep -q "\"HomeLab notes\"" "$1" && grep -q "\"Reference homelab\"" "$1"' _ "$SP"
+check "system prompt labels reference facts, cites files and prefers the newest as_of" bash -c 'grep -q "In the reference lab" "$1" && grep -q "Cite the file name" "$1" && grep -q "newest as_of" "$1" && grep -q "not in your notes" "$1"' _ "$SP"
 check "system prompt is static (no dates or variables)" bash -c '! grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2}|\{\{|\\$\{" "$1"' _ "$SP"
 prompts_ok() {
   local files=(app/advisor/prompts/*.md)
@@ -91,6 +92,109 @@ check "sync is idempotent: a second run creates nothing and updates all three pr
 check "sync without a key file exits 0 and says how to create one" bash -c '[ "$1" -eq 0 ] && grep -q "pct exec 402" <<<"$2"' _ "$RC" "$OUT"
 check "sync without a key file calls nothing" test ! -s "$S/log"
 kill "$STUB_PID"
+
+# ---------- knowledge bases: kb-sync.sh ----------
+K=$(mktemp -d)
+make_kb() { # make_kb DIR: two files in friend-notes/, two in reference/, and a manifest
+  mkdir -p "$1/friend-notes" "$1/reference"
+  printf 'alpha\n' > "$1/friend-notes/Net - One.md"; printf 'beta\n' > "$1/friend-notes/Net - Two.md"
+  printf 'gamma\n' > "$1/reference/Ref - One.md"; printf 'delta\n' > "$1/reference/Ref - Two.md"
+  write_manifest "$1"
+}
+write_manifest() { python3 - "$1" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+files = {str(p.relative_to(root)): {"bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+         for d in ("friend-notes", "reference") for p in sorted((root / d).glob("*.md"))}
+(root / "MANIFEST.json").write_text(json.dumps({"files": files}))
+PY
+}
+stub_start() { # stub_start [ENV=VALUE...]: fresh stub on a new port; sets S and STUB_PID
+  S=$(mktemp -d); : > "$S/log"; env "$@" python3 tests/stubs/owui_stub.py "$S/port" "$S/log" & STUB_PID=$!
+  until [ -s "$S/port" ]; do sleep 0.1; done; printf 'OWUI_API_KEY=testkey\n' > "$S/key.env"
+}
+kbsync() { OWUI_URL="http://127.0.0.1:$(cat "$S/port")" KEY_FILE="$S/key.env" STATE_DIR="$S/state" RETRY_DELAY=0 POLL_DELAY=0 bash app/advisor/kb-sync.sh "${1:-$K/kb}"; }
+uploads() { jq -rs '[.[] | select(.path == "/api/v1/files/") | .body.filename] | sort | join(",")' "$S/log"; }
+removals() { jq -s '[.[] | select(.path | test("/file/remove\\?delete_file=true$"))] | length' "$S/log"; }
+sha() { sha256sum < "$1" | cut -d' ' -f1; }
+
+make_kb "$K/kb"; stub_start
+kbsync >"$S/out" 2>&1; RC=$?
+check "kb-sync exits 0 and uploads the four files" bash -c '[ "$1" -eq 0 ] && [ "$(sed -n "s/^/x/;T" /dev/null; echo "$2")" = "Net - One.md,Net - Two.md,Ref - One.md,Ref - Two.md" ]' _ "$RC" "$(uploads)"
+check "kb-sync uploads each file with the sha256 from the manifest" bash -c '[ "$(jq -rs "[.[] | select(.path == \"/api/v1/files/\") | select(.body.filename == \"Net - Two.md\") | .body.sha256][0]" "$1")" = "$2" ]' _ "$S/log" "$(sha "$K/kb/friend-notes/Net - Two.md")"
+check "kb-sync creates the two bases by name" bash -c '[ "$(jq -rs "[.[] | select(.path == \"/api/v1/knowledge/create\") | .body.name] | sort | join(\",\")" "$1")" = "HomeLab notes,Reference homelab" ]' _ "$S/log"
+check "kb-sync attaches both bases to the model and keeps the other knowledge" bash -c '[ "$(jq -rs "[.[] | select(.path == \"/api/v1/models/model/update\") | .body.meta.knowledge[].name] | sort | join(\",\")" "$1")" = "HomeLab notes,Reference homelab,Someone'"'"'s own base" ]' _ "$S/log"
+: > "$S/log"; kbsync >"$S/out" 2>&1; RC=$?
+check "kb-sync is idempotent: a second run uploads, removes and creates nothing" bash -c '[ "$1" -eq 0 ] && [ -z "$2" ] && [ "$3" -eq 0 ] && ! jq -es "any(.[]; .path == \"/api/v1/knowledge/create\")" "$4" | grep -qx true' _ "$RC" "$(uploads)" "$(removals)" "$S/log"
+printf 'alpha changed\n' > "$K/kb/friend-notes/Net - One.md"; write_manifest "$K/kb"; : > "$S/log"; kbsync >/dev/null 2>&1
+check "kb-sync replaces only the file whose hash changed" bash -c '[ "$1" = "Net - One.md" ] && [ "$2" -eq 1 ]' _ "$(uploads)" "$(removals)"
+rm "$K/kb/reference/Ref - Two.md"; write_manifest "$K/kb"; : > "$S/log"; kbsync >/dev/null 2>&1
+check "kb-sync deletes a file that left the manifest and uploads nothing" bash -c '[ -z "$1" ] && [ "$2" -eq 1 ]' _ "$(uploads)" "$(removals)"
+printf 'alpha changed\n' | cmp -s - "$K/kb/friend-notes/Net - One.md"
+cp -r app/advisor "$K/advisor2"; echo '{"TOP_K": 3}' > "$K/advisor2/retrieval.json"; : > "$S/log"
+OWUI_URL="http://127.0.0.1:$(cat "$S/port")" KEY_FILE="$S/key.env" STATE_DIR="$S/state" RETRY_DELAY=0 POLL_DELAY=0 bash "$K/advisor2/kb-sync.sh" "$K/kb" >/dev/null 2>&1
+check "kb-sync re-uploads everything when retrieval.json changed" bash -c '[ "$1" = "Net - One.md,Net - Two.md,Ref - One.md" ] && [ "$2" -eq 3 ]' _ "$(uploads)" "$(removals)"
+kill "$STUB_PID"
+
+make_kb "$K/kb2"; stub_start STUB_UPLOAD_FAILS="Net - Two.md:1"
+kbsync "$K/kb2" >"$S/out" 2>&1; RC=$?
+check "kb-sync retries a failed upload and succeeds" bash -c '[ "$1" -eq 0 ] && [ "$(grep -c "Net - Two.md" "$2")" -ge 2 ]' _ "$RC" "$S/log"
+kill "$STUB_PID"
+
+stub_start STUB_UPLOAD_FAILS="Net - Two.md:99"
+kbsync "$K/kb2" >"$S/out" 2>&1; RC=$?
+check "kb-sync exits 1 when a file keeps failing, still uploads the others" bash -c '[ "$1" -eq 1 ] && grep -q "FAILED to upload Net - Two.md" "$2" && grep -q "Ref - One.md" "$3"' _ "$RC" "$S/out" "$S/log"
+check "kb-sync does not record success after a failure (next run retries)" test ! -e "$S/state/kb-retrieval.stamp"
+kill "$STUB_PID"
+
+stub_start STUB_PROCESS_STATUS=failed
+kbsync "$K/kb2" >"$S/out" 2>&1; RC=$?
+check "kb-sync treats a file whose processing failed as a failure and deletes it" bash -c '[ "$1" -eq 1 ] && jq -es "any(.[]; .method == \"DELETE\" and (.path | startswith(\"/api/v1/files/\")))" "$2" | grep -qx true' _ "$RC" "$S/log"
+kill "$STUB_PID"
+
+make_kb "$K/kb3"; printf 'tampered\n' > "$K/kb3/friend-notes/Net - One.md"; stub_start
+kbsync "$K/kb3" >"$S/out" 2>&1; RC=$?
+check "kb-sync refuses a file that differs from the manifest" bash -c '[ "$1" -eq 1 ] && grep -q "differs from manifest" "$2" && ! grep -q "Net - One.md" "$3"' _ "$RC" "$S/out" "$S/log"
+: > "$S/log"; OUT=$(kbsync "$K/nothing" 2>&1); RC=$?
+check "kb-sync without a pulled tree exits 0, says so and calls nothing" bash -c '[ "$1" -eq 0 ] && grep -q "no knowledge pull" <<<"$2" && [ ! -s "$3" ]' _ "$RC" "$OUT" "$S/log"
+kill "$STUB_PID"
+
+# sync.sh applies retrieval.json and runs kb-sync
+make_kb "$K/kb4"; stub_start
+OWUI_URL="http://127.0.0.1:$(cat "$S/port")" KEY_FILE="$S/key.env" STATE_DIR="$S/state" KB_ROOT="$K/none" bash app/advisor/sync.sh >/dev/null 2>&1; RC=$?
+check "sync applies retrieval.json to Open WebUI" bash -c '[ "$1" -eq 0 ] && [ "$(jq -cs "[.[] | select(.path == \"/api/v1/retrieval/config/update\") | .body][0]" "$2")" = "$(jq -c . app/advisor/retrieval.json)" ]' _ "$RC" "$S/log"
+check "retrieval.json: header splitting, vector-only, top 15" jq -e '.ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER == true and .ENABLE_RAG_HYBRID_SEARCH == false and .RAG_RERANKING_MODEL == "" and .TOP_K == 15' app/advisor/retrieval.json
+check "compose seeds the same retrieval settings for a fresh install" python3 -c '
+import json,sys,yaml
+e=yaml.safe_load(open("app/compose.yaml"))["services"]["open-webui"]["environment"]; r=json.load(open("app/advisor/retrieval.json"))
+sys.exit(0 if int(e["RAG_TOP_K"])==r["TOP_K"] and int(e["CHUNK_SIZE"])==r["CHUNK_SIZE"] and int(e["CHUNK_OVERLAP"])==r["CHUNK_OVERLAP"] and e["ENABLE_RAG_HYBRID_SEARCH"]=="false" else 1)'
+kill "$STUB_PID"
+
+# ---------- knowledge bases: kb-pull.sh ----------
+make_kb "$K/src"
+git init -q -b main "$K/src"; ( cd "$K/src" && "${G[@]}" add -A && "${G[@]}" commit -qm one )
+git init -q --bare "$K/kb-origin.git"; git -C "$K/src" push -q "$K/kb-origin.git" HEAD:live
+pull() { env KB_REPO="$K/kb-origin.git" KB_KEY="${KB_KEY:-$K/key}" KB_ROOT="$K/root" RETRY_DELAY=0 ATTEMPTS=2 bash app/advisor/kb-pull.sh; }
+echo placeholder > "$K/key"
+OUT=$(KB_KEY="$K/absent" pull 2>&1); RC=$?
+check "kb-pull without a deploy key exits 0 and says so" bash -c '[ "$1" -eq 0 ] && grep -q "no deploy key" <<<"$2" && [ ! -e "$3" ]' _ "$RC" "$OUT" "$K/root"
+pull >/dev/null 2>&1; RC=$?
+check "kb-pull publishes a verified tree as current" bash -c '[ "$1" -eq 0 ] && [ -f "$2/current/friend-notes/Net - One.md" ] && [ ! -e "$2/current/.git" ]' _ "$RC" "$K/root"
+R1=$(readlink "$K/root/current")
+OUT=$(pull 2>&1); RC=$?
+check "kb-pull with nothing new does nothing" bash -c '[ "$1" -eq 0 ] && [ -z "$2" ] && [ "$(readlink "$3/current")" = "$4" ]' _ "$RC" "$OUT" "$K/root" "$R1"
+printf 'ALPHA\n' > "$K/src/friend-notes/Net - One.md"; ( cd "$K/src" && "${G[@]}" commit -qam bad && git push -q "$K/kb-origin.git" HEAD:live )
+OUT=$(pull 2>&1); RC=$?
+check "kb-pull rejects a tree that does not match its manifest and keeps the old one" bash -c '[ "$1" -eq 1 ] && grep -q "hash differs" <<<"$2" && [ "$(readlink "$3/current")" = "$4" ] && grep -qx alpha "$3/current/friend-notes/Net - One.md"' _ "$RC" "$OUT" "$K/root" "$R1"
+( cd "$K/src" && "${G[@]}" reset -q --hard HEAD~1 && printf 'extra\n' > reference/Extra.md && "${G[@]}" add -A && "${G[@]}" commit -qm extra && git push -q -f "$K/kb-origin.git" HEAD:live )
+OUT=$(pull 2>&1); RC=$?
+check "kb-pull rejects a file that is not in the manifest" bash -c '[ "$1" -eq 1 ] && grep -q "differ from the manifest" <<<"$2"' _ "$RC" "$OUT"
+( cd "$K/src" && rm reference/Extra.md && printf 'new content\n' > "friend-notes/Net - Two.md" && write_manifest "$K/src" && "${G[@]}" add -A && "${G[@]}" commit -qm good && git push -q -f "$K/kb-origin.git" HEAD:live )
+pull >/dev/null 2>&1; RC=$?
+check "kb-pull moves current to the new commit and keeps the old release" bash -c '[ "$1" -eq 0 ] && [ "$(readlink "$2/current")" != "$3" ] && [ -d "$2/$3" ] && grep -qx "new content" "$2/current/friend-notes/Net - Two.md"' _ "$RC" "$K/root" "$R1"
+OUT=$(KB_REPO="$K/does-not-exist.git" KB_KEY="$K/key" KB_ROOT="$K/root" RETRY_DELAY=0 ATTEMPTS=2 bash app/advisor/kb-pull.sh 2>&1); RC=$?
+check "kb-pull retries, logs and exits 1 when the repo is unreachable, current untouched" bash -c '[ "$1" -eq 1 ] && grep -q "attempt 1/2" <<<"$2" && [ -f "$3/current/MANIFEST.json" ]' _ "$RC" "$OUT" "$K/root"
+check "kb-pull pins GitHub's host keys (ed25519, ecdsa, rsa)" bash -c '[ "$(grep -c "^github.com ssh-ed25519\|^github.com ecdsa-\|^github.com ssh-rsa" app/advisor/github_known_hosts)" -eq 3 ]'
 
 # ---------- update.sh ----------
 A=$(mktemp -d); mkdir -p "$A/bin"

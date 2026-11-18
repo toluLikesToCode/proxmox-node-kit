@@ -27,8 +27,25 @@ curl -fsS -X POST -H "Authorization: Bearer $jwt" "$OWUI_URL/api/v1/auths/api_ke
 chmod 600 "$K/key.env"
 KEY=$(sed -n 's/^OWUI_API_KEY=//p' "$K/key.env")
 get() { curl -fsS -H "Authorization: Bearer $KEY" "$OWUI_URL$1"; }
-run_sync() { KEY_FILE="$K/key.env" bash app/advisor/sync.sh; }
+export KB_ROOT="$K/kbroot"
+mkdir -p "$K/kb/friend-notes" "$K/kb/reference" "$KB_ROOT"
+printf '# Network\n\nThe DNS server is pihole-lxc at 10.9.8.7.\n' > "$K/kb/friend-notes/Net - One.md"
+printf '# Storage\n\nThe pool is called tank-quartz.\n' > "$K/kb/friend-notes/Net - Two.md"
+printf '# Backups\n\nBackups run nightly with vzdump-zebra.\n' > "$K/kb/reference/Ref - One.md"
+printf '# Alerts\n\nAlerts go to ntfy-topic-orchid.\n' > "$K/kb/reference/Ref - Two.md"
+write_manifest() { python3 - "$K/kb" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+files = {str(p.relative_to(root)): {"bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+         for d in ("friend-notes", "reference") for p in sorted((root / d).glob("*.md"))}
+(root / "MANIFEST.json").write_text(json.dumps({"files": files}))
+PY
+}
+write_manifest; ln -s ../kb "$KB_ROOT/current"
+run_sync() { KEY_FILE="$K/key.env" STATE_DIR="$K/state" bash app/advisor/sync.sh; }
 
+check "before the sync: Open WebUI has hybrid search on and top_k 3" quiet bash -c \
+  'curl -fsS -H "Authorization: Bearer $1" "$2/api/v1/retrieval/config" | jq -e ".ENABLE_RAG_HYBRID_SEARCH == true and .TOP_K == 3"' _ "$KEY" "$OWUI_URL"
 check "before the sync: Open WebUI has no advisor and the wrong settings" quiet bash -c \
   'curl -fsS -H "Authorization: Bearer $1" "$2/api/v1/tasks/config" | jq -e ".ENABLE_TAGS_GENERATION == true and .ENABLE_TITLE_GENERATION == false and .TASK_MODEL_EXTERNAL != \"openai/gpt-oss-20b\"" && [ "$(curl -fsS -H "Authorization: Bearer $1" "$2/api/v1/models/list" | jq ".items | length")" = 0 ]' _ "$KEY" "$OWUI_URL"
 run_sync >"$K/out" 2>&1; RC=$?
@@ -65,15 +82,36 @@ run_sync >"$K/out2" 2>&1; RC=$?
 check "second sync exits 0" test "$RC" -eq 0
 verify "second sync"
 
-# A knowledge base attached to the advisor in the UI must survive the next sync.
-kb=$(curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/v1/knowledge/create" -d '{"name": "HomeLab notes", "description": "test"}' | jq -r .id)
-get "/api/v1/models/model?id=homelab-advisor" | jq -c --arg id "$kb" '.meta.knowledge = [{type: "collection", id: $id, name: "HomeLab notes"}]' |
-  curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/v1/models/model/update" -d @- >/dev/null
+# Retrieval settings and the two knowledge bases.
+kbfiles() { get "/api/v1/knowledge/$1/files" | jq -r '[.items[].filename] | sort | join(",")'; }
+kbid() { get /api/v1/knowledge/ | jq -r --arg n "$1" '[.items[] | select(.name == $n) | .id][0]'; }
+check "sync applies the retrieval settings to the real Open WebUI" quiet bash -c \
+  'curl -fsS -H "Authorization: Bearer $1" "$2/api/v1/retrieval/config" | jq -e ".ENABLE_RAG_HYBRID_SEARCH == false and .TOP_K == 15 and .CHUNK_SIZE == 1024 and .ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER == true"' _ "$KEY" "$OWUI_URL"
+HOME_KB=$(kbid "HomeLab notes"); REF_KB=$(kbid "Reference homelab")
+check "HomeLab notes holds exactly the friend-notes files" test "$(kbfiles "$HOME_KB")" = "Net - One.md,Net - Two.md"
+check "Reference homelab holds exactly the reference files" test "$(kbfiles "$REF_KB")" = "Ref - One.md,Ref - Two.md"
+ids() { get "/api/v1/knowledge/$1/files" | jq -r '[.items[].id] | sort | join(",")'; }
+BEFORE=$(ids "$HOME_KB")
+find_hit() { curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/v1/retrieval/query/collection" \
+  -d "$(jq -nc --arg c "$1" --arg q "$2" '{collection_names: [$c], query: $q, k: 3}')" | jq -r '[.metadatas[0][].name] | join(",")'; }
+check "a search in HomeLab notes finds the file that holds the answer" bash -c 'grep -q "Net - One.md" <<<"$1"' _ "$(find_hit "$HOME_KB" "which host is the DNS server pihole-lxc")"
 run_sync >"$K/out3" 2>&1; RC=$?
-check "third sync exits 0" test "$RC" -eq 0
-check "a knowledge base attached in the UI is still attached after a sync" bash -c \
-  'curl -fsS -H "Authorization: Bearer $1" "$2/api/v1/models/model?id=homelab-advisor" | jq -e --arg id "$3" "[.meta.knowledge[]? | .id] == [\$id]"' _ "$KEY" "$OWUI_URL" "$kb"
-verify "third sync"
+check "a second sync exits 0 and re-uploads nothing" bash -c '[ "$1" -eq 0 ] && [ "$2" = "$3" ] && grep -q "0 uploaded" "$4"' _ "$RC" "$(ids "$HOME_KB")" "$BEFORE" "$K/out3"
+printf '# Network\n\nThe DNS server moved to adguard-lxc.\n' > "$K/kb/friend-notes/Net - One.md"; write_manifest
+run_sync >"$K/out4" 2>&1; RC=$?
+docs=$(curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/v1/retrieval/query/collection" -d "{\"collection_names\": [\"$HOME_KB\"], \"query\": \"DNS server\", \"k\": 5}" | jq -r '.documents[0][]')
+check "a changed file is replaced and the old text is gone" bash -c '[ "$1" -eq 0 ] && [ "$2" = "Net - One.md,Net - Two.md" ] && grep -q adguard-lxc <<<"$3" && ! grep -q pihole <<<"$3"' _ "$RC" "$(kbfiles "$HOME_KB")" "$docs"
+rm "$K/kb/reference/Ref - Two.md"; write_manifest
+run_sync >"$K/out5" 2>&1; RC=$?
+check "a file that left the manifest is removed from the base" bash -c '[ "$1" -eq 0 ] && [ "$2" = "Ref - One.md" ]' _ "$RC" "$(kbfiles "$REF_KB")"
+# A knowledge base someone attached in the UI must survive the next sync.
+other=$(curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/v1/knowledge/create" -d '{"name": "My own base", "description": "test"}' | jq -r .id)
+get "/api/v1/models/model?id=homelab-advisor" | jq -c --arg id "$other" '.meta.knowledge += [{type: "collection", id: $id, name: "My own base"}]' |
+  curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/v1/models/model/update" -d @- >/dev/null
+run_sync >"$K/out6" 2>&1; RC=$?
+check "a sync keeps the base attached in the UI and keeps both advisor bases attached once" bash -c \
+  '[ "$1" -eq 0 ] && curl -fsS -H "Authorization: Bearer $2" "$3/api/v1/models/model?id=homelab-advisor" | jq -e --arg o "$4" --arg h "$5" --arg r "$6" "[.meta.knowledge[].id] | sort == ([\$o, \$h, \$r] | sort)"' _ "$RC" "$KEY" "$OWUI_URL" "$other" "$HOME_KB" "$REF_KB"
+verify "sync with knowledge"
 
 # What actually reaches OpenRouter when someone chats with the advisor.
 chat=$(curl -sS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/chat/completions" \

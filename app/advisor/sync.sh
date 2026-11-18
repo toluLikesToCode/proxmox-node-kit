@@ -1,14 +1,12 @@
 #!/bin/bash
-# Pushes the advisor model, its saved prompts and the cost settings into Open WebUI through its
-# REST API. Safe to run repeatedly. Needs an admin API key in $KEY_FILE; without one it explains
-# how to create it and exits 0.
+# Pushes the advisor model, its saved prompts, the cost and retrieval settings and the knowledge
+# bases into Open WebUI through its REST API. Safe to run repeatedly. Needs an admin API key in
+# $KEY_FILE; without one it explains how to create it and exits 0.
 set -euo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
-URL=${OWUI_URL:-http://127.0.0.1:3000}
-KEY_FILE=${KEY_FILE:-/etc/open-webui-sync.env}
 TASK_MODEL=${TASK_MODEL:-openai/gpt-oss-20b}
-
-KEY=$(sed -n 's/^OWUI_API_KEY=//p' "$KEY_FILE" 2>/dev/null | tail -n 1 || true)
+# shellcheck source=lib.sh
+. "$DIR/lib.sh"
 if [ -z "$KEY" ]; then
   cat <<MSG
 advisor sync skipped: no API key in $KEY_FILE.
@@ -18,13 +16,6 @@ MSG
   exit 0
 fi
 command -v jq >/dev/null || apt-get install -yq jq >/dev/null
-
-# api METHOD PATH [JSON]: prints the response body, fails on an HTTP error.
-api() {
-  local args=(-fsS -X "$1" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json')
-  [ $# -ge 3 ] && args+=(--data-binary "$3")
-  curl "${args[@]}" "$URL$2"
-}
 
 # Model: import is an upsert by id.
 payload=$(jq -c --rawfile system "$DIR/system-prompt.md" '{models: [.params.system = $system]}' "$DIR/model.json")
@@ -59,3 +50,10 @@ api POST /api/v1/tasks/config/update "$tasks" >/dev/null
 models=$(api GET /api/v1/configs/models | jq -c --arg id "$(jq -r .id "$DIR/model.json")" '.DEFAULT_MODELS = $id')
 api POST /api/v1/configs/models "$models" >/dev/null
 echo "synced settings"
+
+# Retrieval settings (chunking, hybrid search, top-k); see retrieval.json. They apply to new uploads.
+api POST /api/v1/retrieval/config/update "$(jq -c . "$DIR/retrieval.json")" >/dev/null
+echo "synced retrieval settings"
+
+# Knowledge bases from the last verified pull of the advisor-kb repo (skips when there is none).
+bash "$DIR/kb-sync.sh"

@@ -20,5 +20,10 @@ services:
       ENABLE_AUTOCOMPLETE_GENERATION: "false"
       ENABLE_SEARCH_QUERY_GENERATION: "false"
       ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      RAG_TOP_K: "15"
+      CHUNK_SIZE: "1024"
+      CHUNK_OVERLAP: "100"
+      ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER: "true"
+      ENABLE_RAG_HYBRID_SEARCH: "false"
     volumes:
       - /srv/open-webui:/app/backend/data
