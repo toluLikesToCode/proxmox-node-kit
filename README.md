@@ -35,7 +35,10 @@ What is in `app/advisor/`:
 | `system-prompt.md` | The model's identity, under 1,500 tokens and static so it can be cached. |
 | `model.json` | The model: base model, native function calling, temperature, answer cap. |
 | `prompts/` | Saved prompts: `/diagnose`, `/plan-change`, `/review`. |
-| `sync.sh` | Pushes the model, the prompts and the cost settings into Open WebUI through its API. |
+| `sync.sh` | Pushes the model, the prompts and the cost and search settings into Open WebUI through its API, then runs `kb-sync.sh`. |
+| `retrieval.json` | Search settings: header-aware splitting, 1,024-character chunks, vector-only search, top 15 chunks. Measured on the real notes; the reasons are in the advisor-kb report. |
+| `kb-pull.sh` | Pulls the `live` branch of the private advisor-kb repo over a read-only deploy key, checks every file against `MANIFEST.json` and swaps `/var/lib/open-webui-kb/current` atomically. A failed pull keeps the previous knowledge. |
+| `kb-sync.sh` | Uploads the pulled notes into two Open WebUI knowledge bases, "HomeLab notes" (the owner's notes, the truth) and "Reference homelab" (another lab's playbook, examples only). It compares content hashes, removes what left the manifest, retries, and leaves other attached knowledge alone. |
 
 ### One-time setup for sync
 
@@ -46,6 +49,14 @@ Once the key is in place, the advisor appears in Open WebUI within 15 minutes. N
 3. On the Proxmox node, as root:
 
        pct exec 402 -- sh -c 'umask 077; echo OWUI_API_KEY=<key> > /etc/open-webui-sync.env'
+
+### Knowledge from the advisor-kb repo
+
+Only what is merged to `main` and promoted to the `live` branch of the advisor-kb repo reaches the node. `update.sh` runs `kb-pull.sh` on every check; when new knowledge arrives the fingerprint changes and `sync.sh` uploads it. Without the deploy key the pull is skipped and the advisor keeps its current knowledge. To turn it on, as root on the node:
+
+1. Create a key pair on the node: `ssh-keygen -t ed25519 -N '' -f /etc/advisor-kb-deploy-key -C advisor-kb-readonly` (put it inside the container that runs the timer, `pct exec 402`, if `update.sh` runs there).
+2. Add `/etc/advisor-kb-deploy-key.pub` as a read-only deploy key on the advisor-kb repo.
+3. The next 15-minute check pulls, verifies and syncs. `KB_REPO`, `KB_BRANCH`, `KB_KEY`, `KB_ROOT`, `KB_SSH_USER` and `KNOWN_HOSTS` override the defaults, so the repo can live on GitHub or any other git server (point `KNOWN_HOSTS` at that server's host key).
 
 Open WebUI saves most settings in its database on first start, so the settings in `app/compose.yaml` only seed a fresh install. `sync.sh` applies the same values to an existing one.
 
@@ -71,13 +82,14 @@ The tests run in Docker:
 - a syntax check of the firewall rules with `nft -c`;
 - the update script's deploy, backup and rollback, against a local git remote;
 - the advisor files, and `sync.sh` against a stub Open WebUI API;
-- the update timer's advisor sync when only the key or the advisor files changed.
+- the update timer's advisor sync when only the key or the advisor files changed;
+- `kb-sync.sh` against the stub (idempotent, changed and removed files, failed uploads, retries, tampered files) and `kb-pull.sh` against a local git origin (verification, atomic swap, unreachable remote).
 
 The integration test needs a few minutes and pulls the Open WebUI image, so CI runs it as a separate job. It is also the one to run after changing `sync.sh` or the Open WebUI tag:
 
     bash tests/integration.sh
 
-It starts the exact image tag from `app/compose.yaml` with a stub OpenRouter, creates the admin account and an API key, runs `sync.sh` twice, then checks the model, prompts and settings in Open WebUI and the request sent to OpenRouter, including `data_collection: deny`.
+It starts the exact image tag from `app/compose.yaml` with a stub OpenRouter, creates the admin account and an API key, runs `sync.sh` several times with a small knowledge tree (changed and removed files included), then checks the model, prompts, retrieval settings, both knowledge bases and a real search in Open WebUI and the request sent to OpenRouter, including `data_collection: deny`.
 
 ## Security
 

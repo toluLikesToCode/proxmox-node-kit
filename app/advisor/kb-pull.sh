@@ -2,7 +2,8 @@
 # Pulls the `live` branch of the advisor-kb repo with a read-only deploy key, verifies every file
 # against MANIFEST.json, and publishes it atomically as $KB_ROOT/current (a symlink to
 # releases/<commit>). A failed or partial pull leaves `current` untouched. Retried, logged to
-# stderr, never touches the app. Without a deploy key it explains how to add one and exits 0.
+# stderr, never touches the app. The host is configuration, not code: KB_REPO, KB_SSH_USER and
+# KNOWN_HOSTS point it at GitHub (default) or any other git server. Without a deploy key it explains how to add one and exits 0.
 set -euo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
 KB_REPO=${KB_REPO:-ssh://github.com/toluLikesToCode/homelab-advisor-kb.git}
@@ -10,6 +11,7 @@ KB_BRANCH=${KB_BRANCH:-live}
 KB_KEY=${KB_KEY:-/etc/advisor-kb-deploy-key}
 KB_ROOT=${KB_ROOT:-/var/lib/open-webui-kb}
 KNOWN_HOSTS=${KNOWN_HOSTS:-$DIR/github_known_hosts}
+KB_SSH_USER=${KB_SSH_USER:-git}
 ATTEMPTS=${ATTEMPTS:-3}
 RETRY_DELAY=${RETRY_DELAY:-10}
 KEEP_RELEASES=${KEEP_RELEASES:-3}
@@ -20,7 +22,7 @@ if [ ! -s "$KB_KEY" ]; then
   exit 0
 fi
 command -v jq >/dev/null || apt-get install -yq jq >/dev/null
-export GIT_SSH_COMMAND="ssh -i $KB_KEY -o User=git -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS -o BatchMode=yes"
+export GIT_SSH_COMMAND="ssh -i $KB_KEY -o User=$KB_SSH_USER -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS -o BatchMode=yes"
 
 retry() {
   local n=1
