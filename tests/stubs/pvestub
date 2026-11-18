@@ -1,0 +1,14 @@
+#!/bin/bash
+# Stands in for Proxmox and network tools: logs each call, answers read-only queries.
+name=$(basename "$0")
+echo "$name $*" >> "${STUB_LOG:?}"
+case "$name $1" in
+  "qm status"|"pct status") [ "${TAKEN_ID:-}" = "$2" ] && { echo "status: running"; exit 0; }; exit 2 ;;
+  "ip -4")
+    if [[ "$*" == *default* ]]; then echo "default via 192.0.2.1 dev vmbr0 proto kernel"
+    else echo "192.0.2.0/24 proto kernel scope link src 192.0.2.12"; fi ;;
+  "pveam available") echo "system          debian-12-standard_12.7-1_amd64.tar.zst"
+                     echo "system          debian-13-standard_13.1-2_amd64.tar.zst" ;;
+  "pveam list") echo "NAME SIZE" ;;
+  *) echo "UNEXPECTED REAL CALL: $name $*" >&2; exit 99 ;;
+esac

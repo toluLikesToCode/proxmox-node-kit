@@ -1,0 +1,19 @@
+# Runs the tests on every push. When main passes, `live` moves to it and the app deploys it.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: write
+jobs:
+  test-and-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: bash tests/docker.sh
+      - name: Promote to live
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: git push origin HEAD:refs/heads/live
