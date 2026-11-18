@@ -65,6 +65,16 @@ run_sync >"$K/out2" 2>&1; RC=$?
 check "second sync exits 0" test "$RC" -eq 0
 verify "second sync"
 
+# A knowledge base attached to the advisor in the UI must survive the next sync.
+kb=$(curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/v1/knowledge/create" -d '{"name": "HomeLab notes", "description": "test"}' | jq -r .id)
+get "/api/v1/models/model?id=homelab-advisor" | jq -c --arg id "$kb" '.meta.knowledge = [{type: "collection", id: $id, name: "HomeLab notes"}]' |
+  curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/v1/models/model/update" -d @- >/dev/null
+run_sync >"$K/out3" 2>&1; RC=$?
+check "third sync exits 0" test "$RC" -eq 0
+check "a knowledge base attached in the UI is still attached after a sync" bash -c \
+  'curl -fsS -H "Authorization: Bearer $1" "$2/api/v1/models/model?id=homelab-advisor" | jq -e --arg id "$3" "[.meta.knowledge[]? | .id] == [\$id]"' _ "$KEY" "$OWUI_URL" "$kb"
+verify "third sync"
+
 # What actually reaches OpenRouter when someone chats with the advisor.
 chat=$(curl -sS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL/api/chat/completions" \
   -d '{"model": "homelab-advisor", "stream": false, "messages": [{"role": "user", "content": "hello"}]}')
