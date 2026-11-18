@@ -15,7 +15,8 @@ REPO_URL=${REPO_URL:-https://github.com/toluLikesToCode/proxmox-node-kit.git}
 REPO_RAW=${REPO_RAW:-https://raw.githubusercontent.com/toluLikesToCode/proxmox-node-kit/live}
 STORAGE_CFG=${STORAGE_CFG:-/etc/pve/storage.cfg}
 SNIPPET_DIR=${SNIPPET_DIR:-/var/lib/vz/snippets}
-IMG=${IMG:-/var/lib/vz/template/iso/noble-server-cloudimg-amd64.img}
+ARCH=${ARCH:-$(dpkg --print-architecture)}
+IMG=${IMG:-/var/lib/vz/template/iso/noble-server-cloudimg-$ARCH.img}
 DRY_RUN=${DRY_RUN:-0}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -42,7 +43,9 @@ for id in "$VMID" "$CTID"; do
 done
 GW=$(ip -4 route show default dev "$BR" | awk '{print $3; exit}')
 LAN=$(ip -4 route show dev "$BR" scope link | awk '{print $1; exit}')
+T=$(pveam available --section system | awk -v a="_$ARCH." '/debian-1[2-9]-standard/ && index($2, a) {print $2}' | sort -V | tail -1)
 if [ -z "$GW" ] || [ -z "$LAN" ]; then echo "Could not read the network of $BR."; exit 1; fi
+if [ -z "$T" ]; then echo "No Debian container template found for $ARCH."; exit 1; fi
 KEYFILE="$HERE/authorized_keys"
 [ -f "$KEYFILE" ] || { KEYFILE=$(mktemp); curl -fsSL "$REPO_RAW/host/authorized_keys" -o "$KEYFILE"; }
 echo "Node $(hostname), network $LAN, gateway $GW, dry run: $DRY_RUN"
@@ -89,7 +92,6 @@ YAML
 echo "Wrote $SNIPPET_DIR/agent-node.yaml"
 
 # ---- container: Open WebUI ----
-T=$(pveam available --section system | awk '/debian-1[2-9]-standard/{print $2}' | sort -V | tail -1)
 pveam list local | grep -q "$T" || run pveam download local "$T"
 run pct create "$CTID" "local:vztmpl/$T" --hostname open-webui --cores 2 --memory 2048 --swap 1024 \
   --rootfs "$STORE:20" --net0 "name=eth0,bridge=$BR,ip=dhcp" --unprivileged 1 \
@@ -98,7 +100,7 @@ run pct create "$CTID" "local:vztmpl/$T" --hostname open-webui --cores 2 --memor
 run pct exec "$CTID" -- bash -c "apt-get update -q && apt-get install -yq curl ca-certificates && curl -fsSL $REPO_RAW/app/bootstrap.sh | REPO_URL=$REPO_URL bash"
 
 # ---- VM: agent-node ----
-[ -f "$IMG" ] || run curl -fL --create-dirs -o "$IMG" https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+[ -f "$IMG" ] || run curl -fL --create-dirs -o "$IMG" "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-$ARCH.img"
 run qm create "$VMID" --name agent-node --memory 8192 --balloon 4096 --cores 4 --cpu host \
   --net0 "virtio,bridge=$BR" --scsihw virtio-scsi-pci --agent enabled=1 --ostype l26 \
   --onboot 1 --serial0 socket --vga serial0

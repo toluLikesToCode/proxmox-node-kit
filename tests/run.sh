@@ -18,13 +18,14 @@ sys.exit(0 if ":" in img and not img.endswith((":main",":latest")) else 1)'
 # ---------- setup.sh dry run ----------
 T=$(mktemp -d)
 printf 'dir: local\n\tpath /var/lib/vz\n\tcontent iso,vztmpl,backup\n\nlvmthin: local-lvm\n\tthinpool data\n' > "$T/storage.cfg"
-dry() { env -i PATH="$PWD/tests/stubs:/usr/bin:/bin" HOME="$T" STUB_LOG="$T/log" \
+dry() { env -i PATH="$PWD/tests/stubs:/usr/bin:/bin" HOME="$T" ARCH=amd64 STUB_LOG="$T/log" \
         STORAGE_CFG="$T/storage.cfg" DRY_SNIPPET_DIR="$T/snip" IMG="$T/none.img" DRY_RUN=1 "$@" bash host/setup.sh; }
 : > "$T/log"; OUT=$(dry 2>&1); RC=$?
 check "dry run exits 0" test "$RC" -eq 0
 check "dry run makes no changing call" bash -c "! grep -qE '^(pvesm set|pct create|pct exec|qm create|qm set|qm start|pveam download|curl)' '$T/log'"
 check "dry run plans the VM" grep -q 'DRY: qm create 401 --name agent-node' <<<"$OUT"
-check "dry run plans the container on the newest Debian" grep -q 'DRY: pct create 402 local:vztmpl/debian-13-standard' <<<"$OUT"
+check "dry run plans the container on the newest Debian for this CPU" grep -q 'DRY: pct create 402 local:vztmpl/debian-13-standard_13.1-2_amd64' <<<"$OUT"
+check "dry run downloads the Ubuntu image for this CPU" grep -q 'noble-server-cloudimg-amd64.img' <<<"$OUT"
 check "dry run adds snippets to local" grep -q 'DRY: pvesm set local --content iso,vztmpl,backup,snippets' <<<"$OUT"
 check "dry run says nothing changed" grep -q 'Nothing was changed' <<<"$OUT"
 : > "$T/log"; OUT2=$(dry TAKEN_ID=402 2>&1); RC=$?
