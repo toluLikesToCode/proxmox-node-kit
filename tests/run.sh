@@ -10,7 +10,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 G=(git -c user.name=t -c user.email=t@t)
 
 # ---------- static ----------
-check "shellcheck" shellcheck host/setup.sh app/*.sh app/advisor/sync.sh tests/run.sh tests/docker.sh
+check "shellcheck" shellcheck host/setup.sh app/*.sh app/advisor/sync.sh tests/run.sh tests/docker.sh tests/integration.sh tests/integration-run.sh
 check "compose.yaml pins an image tag" python3 -c '
 import yaml,sys
 img=yaml.safe_load(open("app/compose.yaml"))["services"]["open-webui"]["image"]

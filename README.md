@@ -39,7 +39,7 @@ What is in `app/advisor/`:
 
 ### One-time setup for sync
 
-`update.sh` runs `sync.sh` after every healthy deploy. A sync failure is logged and never rolls the deploy back. Without a key, `sync.sh` only prints these steps:
+Once the key is in place, the advisor appears in Open WebUI within 15 minutes. No manual run is needed. `update.sh` runs `sync.sh` after every healthy deploy, and on each 15-minute check when the key or the files in `app/advisor/` changed since the last successful sync. A failed sync is retried on the next check, logged, and never rolls the deploy back. Without a key, `sync.sh` only prints these steps:
 
 1. In Open WebUI, go to Settings > Admin > Authentication and turn on API keys. A fresh install has this on already; an existing one keeps its saved setting.
 2. Go to Settings > Account > API Keys and create a key.
@@ -70,7 +70,14 @@ The tests run in Docker:
 - the setup script's dry run, against stub Proxmox tools;
 - a syntax check of the firewall rules with `nft -c`;
 - the update script's deploy, backup and rollback, against a local git remote;
-- the advisor files, and `sync.sh` against a stub Open WebUI API.
+- the advisor files, and `sync.sh` against a stub Open WebUI API;
+- the update timer's advisor sync when only the key or the advisor files changed.
+
+The integration test needs a few minutes and pulls the Open WebUI image, so CI runs it as a separate job. It is also the one to run after changing `sync.sh` or the Open WebUI tag:
+
+    bash tests/integration.sh
+
+It starts the exact image tag from `app/compose.yaml` with a stub OpenRouter, creates the admin account and an API key, runs `sync.sh` twice, then checks the model, prompts and settings in Open WebUI and the request sent to OpenRouter, including `data_collection: deny`.
 
 ## Security
 
