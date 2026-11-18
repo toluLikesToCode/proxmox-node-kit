@@ -174,8 +174,8 @@ kill "$STUB_PID"
 make_kb "$K/src"
 git init -q -b main "$K/src"; ( cd "$K/src" && "${G[@]}" add -A && "${G[@]}" commit -qm one )
 git init -q --bare "$K/kb-origin.git"; git -C "$K/src" push -q "$K/kb-origin.git" HEAD:live
-pull() { env KB_REPO="$K/kb-origin.git" KB_KEY="${KB_KEY:-$K/key}" KB_ROOT="$K/root" RETRY_DELAY=0 ATTEMPTS=2 bash app/advisor/kb-pull.sh; }
-echo placeholder > "$K/key"
+pull() { env KNOWN_HOSTS="$K/known_hosts" KB_REPO="$K/kb-origin.git" KB_KEY="${KB_KEY:-$K/key}" KB_ROOT="$K/root" RETRY_DELAY=0 ATTEMPTS=2 bash app/advisor/kb-pull.sh; }
+echo placeholder > "$K/key"; echo "stand-in host key" > "$K/known_hosts"
 OUT=$(KB_KEY="$K/absent" pull 2>&1); RC=$?
 check "kb-pull without a deploy key exits 0 and says so" bash -c '[ "$1" -eq 0 ] && grep -q "no deploy key" <<<"$2" && [ ! -e "$3" ]' _ "$RC" "$OUT" "$K/root"
 pull >/dev/null 2>&1; RC=$?
@@ -192,9 +192,13 @@ check "kb-pull rejects a file that is not in the manifest" bash -c '[ "$1" -eq 1
 ( cd "$K/src" && rm reference/Extra.md && printf 'new content\n' > "friend-notes/Net - Two.md" && write_manifest "$K/src" && "${G[@]}" add -A && "${G[@]}" commit -qm good && git push -q -f "$K/kb-origin.git" HEAD:live )
 pull >/dev/null 2>&1; RC=$?
 check "kb-pull moves current to the new commit and keeps the old release" bash -c '[ "$1" -eq 0 ] && [ "$(readlink "$2/current")" != "$3" ] && [ -d "$2/$3" ] && grep -qx "new content" "$2/current/friend-notes/Net - Two.md"' _ "$RC" "$K/root" "$R1"
-OUT=$(KB_REPO="$K/does-not-exist.git" KB_KEY="$K/key" KB_ROOT="$K/root" RETRY_DELAY=0 ATTEMPTS=2 bash app/advisor/kb-pull.sh 2>&1); RC=$?
+OUT=$(KNOWN_HOSTS="$K/known_hosts" KB_REPO="$K/does-not-exist.git" KB_KEY="$K/key" KB_ROOT="$K/root" RETRY_DELAY=0 ATTEMPTS=2 bash app/advisor/kb-pull.sh 2>&1); RC=$?
 check "kb-pull retries, logs and exits 1 when the repo is unreachable, current untouched" bash -c '[ "$1" -eq 1 ] && grep -q "attempt 1/2" <<<"$2" && [ -f "$3/current/MANIFEST.json" ]' _ "$RC" "$OUT" "$K/root"
-check "kb-pull pins GitHub's host keys (ed25519, ecdsa, rsa)" bash -c '[ "$(grep -c "^github.com ssh-ed25519\|^github.com ecdsa-\|^github.com ssh-rsa" app/advisor/github_known_hosts)" -eq 3 ]'
+OUT=$(env -u KB_REPO KB_KEY="$K/key" KB_ROOT="$K/root" bash app/advisor/kb-pull.sh 2>&1); RC=$?
+check "kb-pull with KB_REPO unset logs 'kb pull skipped: KB_REPO not set', exits 0, contacts nothing" bash -c '[ "$1" -eq 0 ] && grep -q "kb pull skipped: KB_REPO not set" <<<"$2"' _ "$RC" "$OUT"
+OUT=$(KB_REPO="$K/kb-origin.git" KB_KEY="$K/key" KB_ROOT="$K/root" bash app/advisor/kb-pull.sh 2>&1); RC=$?
+check "kb-pull with KB_REPO set but no KNOWN_HOSTS fails, naming KNOWN_HOSTS" bash -c '[ "$1" -ne 0 ] && grep -q "KNOWN_HOSTS" <<<"$2"' _ "$RC" "$OUT"
+check "no GitHub KB repo, host or known_hosts file is baked into the kit" bash -c '! grep -rqi "homelab-advisor-kb.git\|ssh://github.com" app host && [ ! -e app/advisor/github_known_hosts ]'
 
 # ---------- kb-hub.sh: the master repo and its checks on the node ----------
 HUB=$(mktemp -d); mkdir "$HUB/etc"; echo "owner-secret-word" > "$HUB/etc/denylist.txt"
