@@ -1,0 +1,9 @@
+[Unit]
+Description=Pull a backup of the advisor-kb master repo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/advisor-kb-mirror.env
+ExecStart=/usr/local/bin/kb-mirror.sh

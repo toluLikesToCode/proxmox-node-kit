@@ -10,7 +10,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 G=(git -c user.name=t -c user.email=t@t)
 
 # ---------- static ----------
-check "shellcheck" shellcheck -x -P SCRIPTDIR host/setup.sh app/*.sh app/advisor/*.sh tests/run.sh tests/docker.sh tests/integration.sh tests/integration-run.sh
+check "shellcheck" shellcheck -x -P SCRIPTDIR host/setup.sh host/kb-hub.sh host/kb-mirror.sh app/*.sh app/advisor/*.sh tests/run.sh tests/docker.sh tests/integration.sh tests/integration-run.sh
 check "compose.yaml pins an image tag" python3 -c '
 import yaml,sys
 img=yaml.safe_load(open("app/compose.yaml"))["services"]["open-webui"]["image"]
@@ -195,6 +195,81 @@ check "kb-pull moves current to the new commit and keeps the old release" bash -
 OUT=$(KB_REPO="$K/does-not-exist.git" KB_KEY="$K/key" KB_ROOT="$K/root" RETRY_DELAY=0 ATTEMPTS=2 bash app/advisor/kb-pull.sh 2>&1); RC=$?
 check "kb-pull retries, logs and exits 1 when the repo is unreachable, current untouched" bash -c '[ "$1" -eq 1 ] && grep -q "attempt 1/2" <<<"$2" && [ -f "$3/current/MANIFEST.json" ]' _ "$RC" "$OUT" "$K/root"
 check "kb-pull pins GitHub's host keys (ed25519, ecdsa, rsa)" bash -c '[ "$(grep -c "^github.com ssh-ed25519\|^github.com ecdsa-\|^github.com ssh-rsa" app/advisor/github_known_hosts)" -eq 3 ]'
+
+# ---------- kb-hub.sh: the master repo and its checks on the node ----------
+HUB=$(mktemp -d); mkdir "$HUB/etc"; echo "owner-secret-word" > "$HUB/etc/denylist.txt"
+hub() { KB_BARE="$HUB/kb.git" KB_DENYLIST="${HUB_DENYLIST:-$HUB/etc/denylist.txt}" bash host/kb-hub.sh "$@"; }
+# The repo's own tools are stood in by tiny ones with the same interface: each fails on a planted marker.
+make_work() { # make_work DIR
+  mkdir -p "$1/tools" "$1/tests" "$1/friend-notes"
+  printf 'import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): pass\n' > "$1/tests/test_ok.py"
+  printf '#!/bin/bash\nexit 0\n' > "$1/tests/test_gitleaks.sh"
+  for t in lint.py manifest.py; do printf 'import sys\nsys.exit(0)\n' > "$1/tools/$t"; done
+  printf 'import os, sys, pathlib\nw = os.environ["OWNER_DENYLIST"].strip()\nbad = [p for p in pathlib.Path(".").rglob("*.md") if w in p.read_text()]\nprint("DENYLIST", bad) if bad else None\nsys.exit(1 if bad else 0)\n' > "$1/tools/check_denylist.py"
+  printf '#!/bin/bash\n! grep -rq PLANTED-SECRET friend-notes || { echo LEAK; exit 1; }\n' > "$1/tools/scan.sh"; chmod +x "$1/tools/scan.sh" "$1/tests/test_gitleaks.sh"
+  printf 'hello\n' > "$1/friend-notes/a.md"
+}
+hub init >/dev/null 2>&1
+check "kb-hub init creates a bare repo whose pre-receive hook calls kb-hub.sh" bash -c '[ -x "$1/hooks/pre-receive" ] && grep -q "kb-hub.sh pre-receive" "$1/hooks/pre-receive"' _ "$HUB/kb.git"
+make_work "$HUB/w"; git init -q -b main "$HUB/w"; ( cd "$HUB/w" && "${G[@]}" add -A && "${G[@]}" commit -qm one )
+OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:main 2>&1); RC=$?
+check "a clean push to main is accepted" test "$RC" -eq 0
+OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:live 2>&1); RC=$?
+check "a push to live is rejected, naming the promote command" bash -c '[ "$1" -ne 0 ] && grep -q "kb-hub.sh promote" <<<"$2"' _ "$RC" "$OUT"
+printf 'x PLANTED-SECRET y\n' > "$HUB/w/friend-notes/leak.md"; ( cd "$HUB/w" && "${G[@]}" add -A && "${G[@]}" commit -qm leak )
+OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:main 2>&1); RC=$?
+check "a push that leaks a secret is rejected and main does not move" bash -c '[ "$1" -ne 0 ] && grep -q "checks failed" <<<"$2" && [ "$(git --git-dir="$3" rev-parse main)" != "$(git -C "$4" rev-parse HEAD)" ]' _ "$RC" "$OUT" "$HUB/kb.git" "$HUB/w"
+( cd "$HUB/w" && "${G[@]}" reset -q --hard HEAD~1 && printf 'owner-secret-word\n' > friend-notes/b.md && "${G[@]}" add -A && "${G[@]}" commit -qm deny )
+OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:main 2>&1); RC=$?
+check "a push that hits the node-only deny-list is rejected" bash -c '[ "$1" -ne 0 ] && grep -q "DENYLIST" <<<"$2"' _ "$RC" "$OUT"
+( cd "$HUB/w" && "${G[@]}" reset -q --hard HEAD~1 && printf 'two\n' > friend-notes/c.md && "${G[@]}" add -A && "${G[@]}" commit -qm two )
+git -C "$HUB/w" push -q "$HUB/kb.git" HEAD:main 2>/dev/null
+OUT=$(git -C "$HUB/w" push -f "$HUB/kb.git" HEAD~1:main 2>&1); RC=$?
+check "a force push that rewrites main is rejected" test "$RC" -ne 0
+OUT=$(HUB_DENYLIST="$HUB/etc/missing" hub promote 2>&1); RC=$?
+check "promote fails closed without the deny-list and live does not exist" bash -c '[ "$1" -ne 0 ] && grep -q "failing closed" <<<"$2" && ! git --git-dir="$3" rev-parse -q --verify live >/dev/null' _ "$RC" "$OUT" "$HUB/kb.git"
+hub promote >/dev/null 2>&1; RC=$?; C1=$(git -C "$HUB/w" rev-parse HEAD)
+check "promote moves live to the tip of main after the checks pass" bash -c '[ "$1" -eq 0 ] && [ "$(git --git-dir="$2" rev-parse live)" = "$3" ]' _ "$RC" "$HUB/kb.git" "$C1"
+( cd "$HUB/w" && printf 'three\n' > friend-notes/d.md && "${G[@]}" add -A && "${G[@]}" commit -qm three ) ; C2=$(git -C "$HUB/w" rev-parse HEAD)
+git -C "$HUB/w" push -q "$HUB/kb.git" HEAD:main 2>/dev/null
+git --git-dir="$HUB/kb.git" update-ref refs/heads/main "$C2"
+hub promote >/dev/null 2>&1; RC=$?
+check "promote moves live again and keeps the previous commit as last-good" bash -c '[ "$1" -eq 0 ] && [ "$(git --git-dir="$2" rev-parse live)" = "$3" ] && git --git-dir="$2" for-each-ref --format="%(objectname)" refs/last-good | grep -qx "$4"' _ "$RC" "$HUB/kb.git" "$C2" "$C1"
+hub rollback >/dev/null 2>&1; RC=$?
+check "rollback puts live back on the last-good commit" bash -c '[ "$1" -eq 0 ] && [ "$(git --git-dir="$2" rev-parse live)" = "$3" ]' _ "$RC" "$HUB/kb.git" "$C1"
+# A leaking commit that got onto main some other way (disk edit, old hook) must still not go live.
+( cd "$HUB/w" && printf 'x PLANTED-SECRET y\n' > friend-notes/e.md && "${G[@]}" add -A && "${G[@]}" commit -qm bad ) ; C3=$(git -C "$HUB/w" rev-parse HEAD)
+git --git-dir="$HUB/kb.git" fetch -q "$HUB/w" "$C3"
+git --git-dir="$HUB/kb.git" update-ref refs/heads/main "$C3"
+OUT=$(hub promote 2>&1); RC=$?
+check "promote refuses a leaking commit even if it reached main, and live stays put" bash -c '[ "$1" -ne 0 ] && [ "$(git --git-dir="$2" rev-parse live)" = "$3" ]' _ "$RC" "$HUB/kb.git" "$C1"
+OUT=$(hub promote 0000000000000000000000000000000000000001 2>&1); RC=$?
+check "promote refuses a commit that is not on main" test "$RC" -ne 0
+check "kb-hub logs every promotion and rollback" bash -c '[ "$(grep -c "promote\|rollback" "$1/promotions.log")" -eq 3 ]' _ "$HUB/kb.git"
+
+# kb-hub.sh add-reader and kb-mirror.sh
+AK="$HUB/authorized_keys"; PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkeytestkeytestkeytestkeytestkey1"
+KB_AUTHORIZED_KEYS="$AK" hub add-reader mirror "$PUB" >/dev/null 2>&1; RC=$?
+check "add-reader writes a key that can only run git-upload-pack on the repo" bash -c '[ "$1" -eq 0 ] && grep -qF "command=\"git-upload-pack '"'"'$2'"'"'\",restrict $3 advisor-kb-mirror" "$4"' _ "$RC" "$HUB/kb.git" "$PUB" "$AK"
+OUT=$(KB_AUTHORIZED_KEYS="$AK" hub add-reader evil 'command="sh" ssh-ed25519 AAAA' 2>&1); RC=$?
+check "add-reader rejects a key that carries its own options" bash -c '[ "$1" -ne 0 ] && [ "$(wc -l < "$2")" -eq 1 ]' _ "$RC" "$AK"
+KB_AUTHORIZED_KEYS="$AK" hub add-reader mirror "$PUB" >/dev/null 2>&1
+check "add-reader does not add the same key twice" bash -c '[ "$(wc -l < "$1")" -eq 1 ]' _ "$AK"
+mirror() { KB_MIRROR_REMOTE="$HUB/kb.git" KB_MIRROR="$HUB/mirror.git" KB_BUNDLE_DIR="$HUB/bundles" "$@" bash host/kb-mirror.sh; }
+mkdir -p "$HUB/offsite"
+OUT=$(mirror env KB_OFFSITE_CMD="cp -t $HUB/offsite" 2>&1); RC=$?
+check "kb-mirror fetches every ref, writes a verified bundle and hands it to the offsite command" bash -c '[ "$1" -eq 0 ] && [ "$(git --git-dir="$2" rev-parse live)" = "$(git --git-dir="$3" rev-parse live)" ] && b=$(ls "$4"/*.bundle) && git --git-dir="$2" bundle verify "$b" >/dev/null 2>&1 && [ -f "$5/$(basename "$b")" ]' _ "$RC" "$HUB/mirror.git" "$HUB/kb.git" "$HUB/bundles" "$HUB/offsite"
+OUT=$(mirror env 2>&1); RC=$?
+check "kb-mirror with nothing new writes no second bundle" bash -c '[ "$1" -eq 0 ] && [ "$(ls "$2" | wc -l)" -eq 1 ] && grep -q "no change" <<<"$3"' _ "$RC" "$HUB/bundles" "$OUT"
+BEFORE=$(git --git-dir="$HUB/mirror.git" rev-parse main)
+OUT=$(KB_MIRROR_REMOTE="$HUB/gone.git" KB_MIRROR="$HUB/mirror.git" KB_BUNDLE_DIR="$HUB/bundles" bash host/kb-mirror.sh 2>&1); RC=$?
+check "kb-mirror leaves the mirror and the bundles alone when the master is unreachable" bash -c '[ "$1" -ne 0 ] && grep -q "fetch failed" <<<"$2" && [ "$(git --git-dir="$3" rev-parse main)" = "$4" ] && [ "$(ls "$5" | wc -l)" -eq 1 ]' _ "$RC" "$OUT" "$HUB/mirror.git" "$BEFORE" "$HUB/bundles"
+git init -q --bare -b main "$HUB/empty.git"
+OUT=$(KB_MIRROR_REMOTE="$HUB/empty.git" KB_MIRROR="$HUB/mirror.git" KB_BUNDLE_DIR="$HUB/bundles" bash host/kb-mirror.sh 2>&1); RC=$?
+check "kb-mirror refuses a master with no main (an emptied repo must not overwrite the backup)" bash -c '[ "$1" -ne 0 ] && [ "$(git --git-dir="$2" rev-parse main)" = "$3" ]' _ "$RC" "$HUB/mirror.git" "$BEFORE"
+OUT=$(KB_MIRROR_REMOTE="ssh://git@node/srv/x.git" KB_MIRROR_KEY="$HUB/nokey" KB_MIRROR="$HUB/m2.git" bash host/kb-mirror.sh 2>&1); RC=$?
+check "kb-mirror over ssh needs the key and the pinned host key" bash -c '[ "$1" -ne 0 ] && grep -q "no key" <<<"$2"' _ "$RC" "$OUT"
+check "kb-mirror units: nightly, persistent timer; oneshot service" bash -c 'grep -q "^OnCalendar=" host/kb-mirror.timer && grep -q "^Persistent=true" host/kb-mirror.timer && grep -q "^Type=oneshot" host/kb-mirror.service'
 
 # ---------- update.sh ----------
 A=$(mktemp -d); mkdir -p "$A/bin"

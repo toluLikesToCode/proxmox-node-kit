@@ -50,6 +50,12 @@ Once the key is in place, the advisor appears in Open WebUI within 15 minutes. N
 
        pct exec 402 -- sh -c 'umask 077; echo OWUI_API_KEY=<key> > /etc/open-webui-sync.env'
 
+### Hosting the advisor-kb repo on the node (no git host)
+
+`host/kb-hub.sh` turns one machine into the master of the advisor-kb repo: a bare repo with a `pre-receive` hook that runs the repo's own checks (unit tests, lint, manifest, deny-list, gitleaks) before `main` moves, and a `promote` command that re-runs them on the whole history before it moves `live`. Nobody can push `live`; `rollback` puts it back on the last good commit. The owner's deny-list stays on that machine (`/etc/advisor-kb/denylist.txt`), never in the repo. `kb-hub.sh add-reader NAME PUBKEY` installs a key that can only run `git-upload-pack` on the repo; use one for the node's pull (`KB_REPO` points `kb-pull.sh` at this machine) and one for the backup.
+
+`host/kb-mirror.sh` (with `kb-mirror.service` and `kb-mirror.timer`) runs on another machine we control, pulls a mirror nightly, verifies it, writes a bundle and hands it to the offsite command (`KB_OFFSITE_CMD`). A failed or empty fetch never replaces the last good mirror.
+
 ### Knowledge from the advisor-kb repo
 
 Only what is merged to `main` and promoted to the `live` branch of the advisor-kb repo reaches the node. `update.sh` runs `kb-pull.sh` on every check; when new knowledge arrives the fingerprint changes and `sync.sh` uploads it. Without the deploy key the pull is skipped and the advisor keeps its current knowledge. To turn it on, as root on the node:
