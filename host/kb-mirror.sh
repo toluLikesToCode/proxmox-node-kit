@@ -9,7 +9,7 @@
 #   KB_MIRROR_KNOWN_HOSTS  pinned host key of the master (required with an ssh URL)
 #   KB_MIRROR          mirror path (default /srv/advisor-kb-mirror.git)
 #   KB_BUNDLE_DIR      where bundles go (default /srv/advisor-kb-bundles); KEEP_BUNDLES (default 14)
-#   KB_OFFSITE_CMD     optional command run as: $KB_OFFSITE_CMD <bundle path>, e.g. an rclone copyto to B2
+#   KB_OFFSITE_CMD     optional command run as: $KB_OFFSITE_CMD <bundle path>, see README (the homelab B2 flow)
 set -euo pipefail
 : "${KB_MIRROR_REMOTE:?set KB_MIRROR_REMOTE}"
 KB_MIRROR=${KB_MIRROR:-/srv/advisor-kb-mirror.git}

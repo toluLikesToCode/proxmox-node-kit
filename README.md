@@ -52,9 +52,18 @@ Once the key is in place, the advisor appears in Open WebUI within 15 minutes. N
 
 ### Hosting the advisor-kb repo on the node (no git host)
 
-`host/kb-hub.sh` turns one machine into the master of the advisor-kb repo: a bare repo with a `pre-receive` hook that runs the repo's own checks (unit tests, lint, manifest, deny-list, gitleaks) before `main` moves, and a `promote` command that re-runs them on the whole history before it moves `live`. Nobody can push `live`; `rollback` puts it back on the last good commit. The owner's deny-list stays on that machine (`/etc/advisor-kb/denylist.txt`), never in the repo. `kb-hub.sh add-reader NAME PUBKEY` installs a key that can only run `git-upload-pack` on the repo; use one for the node's pull (`KB_REPO` points `kb-pull.sh` at this machine) and one for the backup.
+`host/kb-hub.sh` turns one machine into the master of the advisor-kb repo: a bare repo with a `pre-receive` hook that runs the checks (unit tests, lint, manifest, deny-list, gitleaks) before `main` moves. The checks come from a copy installed on that machine (`kb-hub.sh install-tools <reviewed checkout or commit>`, directory `/usr/local/lib/advisor-kb`), never from the pushed commit, so a push that edits `tools/` is still judged by the old tools until someone reviews it and reinstalls. gitleaks is a pinned, sha256-verified binary (`kb-hub.sh install-gitleaks`), so the git user needs no Docker access, and a `promote` command that re-runs them on the whole history before it moves `live`. Nobody can push `live`; `rollback` puts it back on the last good commit. The owner's deny-list stays on that machine (`/etc/advisor-kb/denylist.txt`), never in the repo. `kb-hub.sh add-reader NAME PUBKEY` installs a key that can only run `git-upload-pack` on the repo; use one for the node's pull (`KB_REPO` points `kb-pull.sh` at this machine) and one for the backup.
 
 `host/kb-mirror.sh` (with `kb-mirror.service` and `kb-mirror.timer`) runs on another machine we control, pulls a mirror nightly, verifies it, writes a bundle and hands it to the offsite command (`KB_OFFSITE_CMD`). A failed or empty fetch never replaces the last good mirror.
+
+The homelab's offsite flow (`homelab-offsite.service` on the Proxmox nodes) is an rclone crypt remote named `offsite` over a B2 bucket, configured by `RCLONE_CONFIG_OFFSITE_*` variables in `/etc/rclone/homelab-offsite.env`. Its key cannot delete, so use the same remote with a prefix outside the bucket's expiring `weekly/` folder. On the machine that runs the mirror, with that env file present (without the Kuma URL), set `KB_OFFSITE_CMD=/usr/local/sbin/kb-offsite.sh`, where the script is:
+
+    #!/bin/bash
+    set -euo pipefail
+    set -a; . /etc/rclone/homelab-offsite.env; set +a
+    exec rclone copy --b2-hard-delete=false --bwlimit 12M "$1" offsite:advisor-kb/
+
+Bundles are named by date and ref hash, are small, and are never deleted offsite (the key cannot delete), so growth is one small file per change.
 
 ### Knowledge from the advisor-kb repo
 

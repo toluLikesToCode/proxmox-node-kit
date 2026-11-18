@@ -198,7 +198,7 @@ check "kb-pull pins GitHub's host keys (ed25519, ecdsa, rsa)" bash -c '[ "$(grep
 
 # ---------- kb-hub.sh: the master repo and its checks on the node ----------
 HUB=$(mktemp -d); mkdir "$HUB/etc"; echo "owner-secret-word" > "$HUB/etc/denylist.txt"
-hub() { KB_BARE="$HUB/kb.git" KB_DENYLIST="${HUB_DENYLIST:-$HUB/etc/denylist.txt}" bash host/kb-hub.sh "$@"; }
+hub() { KB_BARE="$HUB/kb.git" KB_TOOLS="$HUB/node-tools" KB_DENYLIST="${HUB_DENYLIST:-$HUB/etc/denylist.txt}" bash host/kb-hub.sh "$@"; }
 # The repo's own tools are stood in by tiny ones with the same interface: each fails on a planted marker.
 make_work() { # make_work DIR
   mkdir -p "$1/tools" "$1/tests" "$1/friend-notes"
@@ -207,11 +207,17 @@ make_work() { # make_work DIR
   for t in lint.py manifest.py; do printf 'import sys\nsys.exit(0)\n' > "$1/tools/$t"; done
   printf 'import os, sys, pathlib\nw = os.environ["OWNER_DENYLIST"].strip()\nbad = [p for p in pathlib.Path(".").rglob("*.md") if w in p.read_text()]\nprint("DENYLIST", bad) if bad else None\nsys.exit(1 if bad else 0)\n' > "$1/tools/check_denylist.py"
   printf '#!/bin/bash\n! grep -rq PLANTED-SECRET friend-notes || { echo LEAK; exit 1; }\n' > "$1/tools/scan.sh"; chmod +x "$1/tools/scan.sh" "$1/tests/test_gitleaks.sh"
-  printf 'hello\n' > "$1/friend-notes/a.md"
+  printf 'hello\n' > "$1/friend-notes/a.md"; printf '# stand-in rules\n' > "$1/.gitleaks.toml"
 }
 hub init >/dev/null 2>&1
-check "kb-hub init creates a bare repo whose pre-receive hook calls kb-hub.sh" bash -c '[ -x "$1/hooks/pre-receive" ] && grep -q "kb-hub.sh pre-receive" "$1/hooks/pre-receive"' _ "$HUB/kb.git"
 make_work "$HUB/w"; git init -q -b main "$HUB/w"; ( cd "$HUB/w" && "${G[@]}" add -A && "${G[@]}" commit -qm one )
+OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:main 2>&1); RC=$?
+check "a push fails closed while the node has no installed tools or gitleaks" bash -c '[ "$1" -ne 0 ] && grep -q "failing closed" <<<"$2" && ! git --git-dir="$3" rev-parse -q --verify main >/dev/null' _ "$RC" "$OUT" "$HUB/kb.git"
+hub install-tools "$HUB/w" >/dev/null 2>&1
+OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:main 2>&1); RC=$?
+check "a push still fails closed with tools installed but no gitleaks binary" bash -c '[ "$1" -ne 0 ] && grep -q "install-gitleaks" <<<"$2"' _ "$RC" "$OUT"
+printf '#!/bin/sh\nexit 0\n' > "$HUB/node-tools/bin/gitleaks"; chmod +x "$HUB/node-tools/bin/gitleaks"
+check "kb-hub init creates a bare repo whose pre-receive hook calls kb-hub.sh" bash -c '[ -x "$1/hooks/pre-receive" ] && grep -q "kb-hub.sh pre-receive" "$1/hooks/pre-receive"' _ "$HUB/kb.git"
 OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:main 2>&1); RC=$?
 check "a clean push to main is accepted" test "$RC" -eq 0
 OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:live 2>&1); RC=$?
@@ -237,6 +243,10 @@ hub promote >/dev/null 2>&1; RC=$?
 check "promote moves live again and keeps the previous commit as last-good" bash -c '[ "$1" -eq 0 ] && [ "$(git --git-dir="$2" rev-parse live)" = "$3" ] && git --git-dir="$2" for-each-ref --format="%(objectname)" refs/last-good | grep -qx "$4"' _ "$RC" "$HUB/kb.git" "$C2" "$C1"
 hub rollback >/dev/null 2>&1; RC=$?
 check "rollback puts live back on the last-good commit" bash -c '[ "$1" -eq 0 ] && [ "$(git --git-dir="$2" rev-parse live)" = "$3" ]' _ "$RC" "$HUB/kb.git" "$C1"
+# A push that edits tools/ is judged by the node's installed copy, not by the pushed one.
+( cd "$HUB/w" && printf '#!/bin/bash\nexit 0\n' > tools/scan.sh && printf 'x PLANTED-SECRET y\n' > friend-notes/f.md && "${G[@]}" add -A && "${G[@]}" commit -qm "neuter scan and leak" )
+OUT=$(git -C "$HUB/w" push "$HUB/kb.git" HEAD:main 2>&1); RC=$?
+check "a push that neuters tools/scan.sh and leaks is still rejected by the installed tools" bash -c '[ "$1" -ne 0 ] && grep -q "LEAK" <<<"$2" && [ "$(git --git-dir="$3" rev-parse main)" != "$(git -C "$4" rev-parse HEAD)" ]' _ "$RC" "$OUT" "$HUB/kb.git" "$HUB/w"
 # A leaking commit that got onto main some other way (disk edit, old hook) must still not go live.
 ( cd "$HUB/w" && printf 'x PLANTED-SECRET y\n' > friend-notes/e.md && "${G[@]}" add -A && "${G[@]}" commit -qm bad ) ; C3=$(git -C "$HUB/w" rev-parse HEAD)
 git --git-dir="$HUB/kb.git" fetch -q "$HUB/w" "$C3"
@@ -245,6 +255,12 @@ OUT=$(hub promote 2>&1); RC=$?
 check "promote refuses a leaking commit even if it reached main, and live stays put" bash -c '[ "$1" -ne 0 ] && [ "$(git --git-dir="$2" rev-parse live)" = "$3" ]' _ "$RC" "$HUB/kb.git" "$C1"
 OUT=$(hub promote 0000000000000000000000000000000000000001 2>&1); RC=$?
 check "promote refuses a commit that is not on main" test "$RC" -ne 0
+# gitleaks is a pinned binary: a download whose sha256 differs is refused and nothing is installed; no Docker is involved.
+GL=$(mktemp -d); printf 'not gitleaks\n' > "$GL/gitleaks"; tar -czf "$GL/gitleaks_8.30.0_linux_x64.tar.gz" -C "$GL" gitleaks; cp "$GL/gitleaks_8.30.0_linux_x64.tar.gz" "$GL/gitleaks_8.30.0_linux_arm64.tar.gz"
+rm -f "$HUB/node-tools/bin/gitleaks"
+OUT=$(KB_GITLEAKS_URL="file://$GL" hub install-gitleaks 2>&1); RC=$?
+check "install-gitleaks refuses a download whose sha256 is not the pinned one" bash -c '[ "$1" -ne 0 ] && grep -q "does not match the pinned" <<<"$2" && [ ! -e "$3/bin/gitleaks" ]' _ "$RC" "$OUT" "$HUB/node-tools"
+check "kb-hub.sh runs no Docker and pins gitleaks 8.30.0 by sha256" bash -c '! grep -v "^ *#" host/kb-hub.sh | grep -qi docker && grep -q "GITLEAKS_VERSION=8.30.0" host/kb-hub.sh && [ "$(grep -c "want=[0-9a-f]\{64\} " host/kb-hub.sh)" -eq 2 ]'
 check "kb-hub logs every promotion and rollback" bash -c '[ "$(grep -c "promote\|rollback" "$1/promotions.log")" -eq 3 ]' _ "$HUB/kb.git"
 
 # kb-hub.sh add-reader and kb-mirror.sh
