@@ -9,13 +9,35 @@ HEALTH_URL=${HEALTH_URL:-http://127.0.0.1:3000/health}
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-300}
 KEEP_BACKUPS=${KEEP_BACKUPS:-5}
 BRANCH=${BRANCH:-live}
+KEY_FILE=${KEY_FILE:-/etc/open-webui-sync.env}
+STATE_DIR=${STATE_DIR:-/var/lib/open-webui-update}
 COMPOSE=(docker compose -f "$REPO_DIR/app/compose.yaml")
+
+# The advisor config is not part of the deploy: a failed sync is logged, never rolled back.
+# Fingerprint = advisor files + key file; empty without a key. The stamp holds the fingerprint of
+# the last successful sync, so the timer retries a failed sync and picks up a key added later.
+fingerprint() {
+  [ -s "$KEY_FILE" ] || return 0
+  { find "$REPO_DIR/app/advisor" -type f | sort | xargs sha256sum | sed "s# $REPO_DIR/# #"; sha256sum < "$KEY_FILE"; } | sha256sum
+}
+sync_advisor() {
+  local fp; fp=$(fingerprint)
+  if bash "$REPO_DIR/app/advisor/sync.sh"; then
+    if [ -n "$fp" ]; then mkdir -p "$STATE_DIR"; echo "$fp" > "$STATE_DIR/advisor-sync.stamp"; fi
+  else
+    echo "Advisor sync failed; the deploy stands." >&2
+  fi
+}
 
 cd "$REPO_DIR"
 git fetch -q origin "$BRANCH"
 OLD=$(git rev-parse HEAD)
 NEW=$(git rev-parse "origin/$BRANCH")
-if [ "$OLD" = "$NEW" ] && [ "${FORCE:-0}" != 1 ]; then exit 0; fi
+if [ "$OLD" = "$NEW" ] && [ "${FORCE:-0}" != 1 ]; then
+  fp=$(fingerprint)
+  if [ -n "$fp" ] && [ "$fp" != "$(cat "$STATE_DIR/advisor-sync.stamp" 2>/dev/null || true)" ]; then sync_advisor; fi
+  exit 0
+fi
 
 healthy() {
   local waited=0
@@ -36,8 +58,7 @@ git merge -q --ff-only "origin/$BRANCH"
 "${COMPOSE[@]}" up -d
 if healthy; then
   echo "Deployed ${NEW:0:8}."
-  # The advisor config is not part of the deploy: a failed sync is logged, never rolled back.
-  bash "$REPO_DIR/app/advisor/sync.sh" || echo "Advisor sync failed; the deploy stands." >&2
+  sync_advisor
   exit 0
 fi
 

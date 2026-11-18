@@ -97,6 +97,7 @@ A=$(mktemp -d); mkdir -p "$A/bin"
 printf '#!/bin/bash\necho "docker $*" >> "$APPLY_LOG"\n' > "$A/bin/docker"
 cat > "$A/bin/curl" <<'STUB'
 #!/bin/bash
+echo "curl $*" >> "$APPLY_LOG"
 case "$*" in *"${CURL_FAIL_ON:-@@none@@}"*) exit 1;; esac
 [ "${HEALTH:-up}" = up ]
 STUB
@@ -108,7 +109,8 @@ cp -r app "$A/work/"
 git clone -q -b live "$A/origin.git" "$A/deployed"
 mkdir -p "$A/data"; echo v1 > "$A/data/webui.db"
 update() { env PATH="$A/bin:$PATH" APPLY_LOG="$A/log" REPO_DIR="$A/deployed" DATA_DIR="$A/data" \
-          BACKUP_DIR="$A/bak" HEALTH_TIMEOUT=0 "$@" bash app/update.sh; }
+          BACKUP_DIR="$A/bak" STATE_DIR="$A/state" HEALTH_TIMEOUT=0 "$@" bash app/update.sh; }
+synced() { grep -q '/api/v1/models/import' "$A/log"; }
 push_change() { ( cd "$A/work" && echo "# $1" >> app/compose.yaml && "${G[@]}" commit -qam "$1" && git push -q origin HEAD:live ); }
 
 : > "$A/log"; update >/dev/null 2>&1; RC=$?
@@ -126,6 +128,26 @@ check "update: unhealthy deploy restores the data" grep -qx v2 "$A/data/webui.db
 push_change four; : > "$A/log"; printf 'OWUI_API_KEY=k\n' > "$A/key.env"
 update KEY_FILE="$A/key.env" CURL_FAIL_ON=/api/v1/models/import >"$A/out" 2>&1; RC=$?
 check "update: deploy stands when the advisor sync fails" bash -c "[ $RC -eq 0 ] && grep -q 'up -d' '$A/log' && grep -q 'Advisor sync failed' '$A/out' && [ \"\$(git -C '$A/deployed' rev-parse HEAD)\" = \"\$(git -C '$A/origin.git' rev-parse live)\" ]"
+
+# Without a new commit the timer still syncs when a key appears or changes, and retries a failed sync.
+tick() { : > "$A/log"; update KEY_FILE="$A/key.env" "$@" >"$A/out" 2>&1; }
+rm -f "$A/key.env"; tick
+check "update: no key and no new commit does nothing" bash -c "[ ! -s '$A/log' ] && [ ! -s '$A/out' ]"
+printf 'OWUI_API_KEY=k1\n' > "$A/key.env"; tick
+check "update: a key added later is synced without a new commit" bash -c "grep -q '/api/v1/models/import' '$A/log' && ! grep -q 'up -d' '$A/log'"
+tick
+check "update: nothing changed since the last sync: no sync" bash -c "[ ! -s '$A/log' ]"
+printf 'OWUI_API_KEY=k2\n' > "$A/key.env"; tick
+check "update: a changed key is synced again" synced
+echo '{}' >> "$A/deployed/app/advisor/model.json"; tick
+check "update: changed advisor config is synced again" synced
+tick
+check "update: ...and then left alone" bash -c "[ ! -s '$A/log' ]"
+printf 'OWUI_API_KEY=k3\n' > "$A/key.env"; tick CURL_FAIL_ON=/api/v1/models/import; RC=$?
+check "update: a failed sync without a new commit is logged and exits 0" bash -c "[ $RC -eq 0 ] && grep -q 'Advisor sync failed' '$A/out'"
+tick
+check "update: a failed sync is retried on the next tick" synced
+git -C "$A/deployed" checkout -q app/advisor/model.json
 
 echo; echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
