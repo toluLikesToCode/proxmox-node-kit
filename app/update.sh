@@ -35,7 +35,10 @@ git merge -q --ff-only "origin/$BRANCH"
 "${COMPOSE[@]}" pull -q
 "${COMPOSE[@]}" up -d
 if healthy; then
-  echo "Deployed ${NEW:0:8}."; exit 0
+  echo "Deployed ${NEW:0:8}."
+  # The advisor config is not part of the deploy: a failed sync is logged, never rolled back.
+  bash "$REPO_DIR/app/advisor/sync.sh" || echo "Advisor sync failed; the deploy stands." >&2
+  exit 0
 fi
 
 echo "Deploy of ${NEW:0:8} is unhealthy. Restoring ${OLD:0:8}." >&2

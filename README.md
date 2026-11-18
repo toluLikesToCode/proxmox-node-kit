@@ -19,6 +19,36 @@ When it finishes, the script prints a QR code for each step that needs a login o
 
 Settings such as `VMID`, `CTID`, `STORE` and `BR` can be overridden with environment variables.
 
+## Requirements
+
+The Open WebUI container runs a custom model, Homelab Advisor, defined in `app/advisor/`.
+
+- It advises one homelab owner on Proxmox, Docker and Compose, Linux, networking and DNS, backups, remote access (Tailscale, Cloudflare-style tunnels), monitoring and media servers, and on git, testing, CI, security and code review.
+- It answers from attached knowledge when there is any (the model calls Open WebUI's knowledge tools) and says when it does not know.
+- It is cheap to run. Every model call goes through OpenRouter, background calls (tags, follow-ups, autocomplete, search and retrieval queries) are off, and answers are capped in length.
+- It is safe. It never asks for or repeats secrets, gives steps with an undo, and warns before destructive commands.
+
+What is in `app/advisor/`:
+
+| File | What it is |
+|---|---|
+| `system-prompt.md` | The model's identity, under 1,500 tokens and static so it can be cached. |
+| `model.json` | The model: base model, native function calling, temperature, answer cap. |
+| `prompts/` | Saved prompts: `/diagnose`, `/plan-change`, `/review`. |
+| `sync.sh` | Pushes the model, the prompts and the cost settings into Open WebUI through its API. |
+
+### One-time setup for sync
+
+`update.sh` runs `sync.sh` after every healthy deploy. A sync failure is logged and never rolls the deploy back. Without a key, `sync.sh` only prints these steps:
+
+1. In Open WebUI, go to Settings > Admin > Authentication and turn on API keys. A fresh install has this on already; an existing one keeps its saved setting.
+2. Go to Settings > Account > API Keys and create a key.
+3. On the Proxmox node, as root:
+
+       pct exec 402 -- sh -c 'umask 077; echo OWUI_API_KEY=<key> > /etc/open-webui-sync.env'
+
+Open WebUI saves most settings in its database on first start, so the settings in `app/compose.yaml` only seed a fresh install. `sync.sh` applies the same values to an existing one.
+
 ## Updates
 
 1. Push to `main`.
@@ -39,7 +69,8 @@ To upgrade Open WebUI, change the image tag in `app/compose.yaml`. The last five
 The tests run in Docker:
 - the setup script's dry run, against stub Proxmox tools;
 - a syntax check of the firewall rules with `nft -c`;
-- the update script's deploy, backup and rollback, against a local git remote.
+- the update script's deploy, backup and rollback, against a local git remote;
+- the advisor files, and `sync.sh` against a stub Open WebUI API.
 
 ## Security
 

@@ -1,0 +1,16 @@
+{
+  "id": "homelab-advisor",
+  "name": "Homelab Advisor",
+  "base_model_id": "deepseek/deepseek-v4.1-flash-1017",
+  "params": {
+    "function_calling": "native",
+    "temperature": 0.3,
+    "max_tokens": 1200
+  },
+  "meta": {
+    "description": "Homelab and software-practices advisor. Answers from attached knowledge when it exists.",
+    "capabilities": { "builtin_tools": true },
+    "builtinTools": { "knowledge": true }
+  },
+  "is_active": true
+}
