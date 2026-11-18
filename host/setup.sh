@@ -66,6 +66,7 @@ write_files:
       #!/usr/sbin/nft -f
       # Outbound filter: no new connections to the local network or the tailnet.
       # Replies to inbound connections are allowed, as are DNS and DHCP.
+      # The forward chain applies the same rule to Docker containers, whose traffic skips the output hook.
       table inet node_guard
       delete table inet node_guard
       table inet node_guard {
@@ -77,6 +78,15 @@ write_files:
           ip daddr @LAN@ tcp dport 53 accept
           udp dport 67 accept
           ip daddr 100.100.100.100 accept
+          ip daddr @LAN@ drop
+          ip daddr 100.64.0.0/10 drop
+          ip6 daddr fc00::/7 drop
+        }
+        chain forward {
+          type filter hook forward priority -1; policy accept;
+          ct state established,related accept
+          ip daddr @LAN@ udp dport 53 accept
+          ip daddr @LAN@ tcp dport 53 accept
           ip daddr @LAN@ drop
           ip daddr 100.64.0.0/10 drop
           ip6 daddr fc00::/7 drop

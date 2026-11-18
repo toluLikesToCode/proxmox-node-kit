@@ -37,6 +37,7 @@ python3 -c 'import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))["write_file
 check "first-boot file has the network filled in" bash -c "grep -q '192.0.2.0/24' '$T/guard.nft' && ! grep -q '@LAN@' '$T/guard.nft'"
 check "firewall rules pass nft -c" nft -c -f "$T/guard.nft"
 check "firewall blocks the local network and the tailnet" bash -c "grep -q 'ip daddr 192.0.2.0/24 drop' '$T/guard.nft' && grep -q '100.64.0.0/10 drop' '$T/guard.nft'"
+check "firewall also blocks containers (forward hook) from the local network and the tailnet" bash -c "sed -n '/chain forward/,/}/p' '$T/guard.nft' | grep -q 'hook forward' && sed -n '/chain forward/,/}/p' '$T/guard.nft' | grep -q 'ip daddr 192.0.2.0/24 drop' && sed -n '/chain forward/,/}/p' '$T/guard.nft' | grep -q '100.64.0.0/10 drop'"
 
 # ---------- advisor config ----------
 quiet() { "$@" >/dev/null; }
