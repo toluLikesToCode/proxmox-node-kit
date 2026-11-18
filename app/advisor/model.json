@@ -5,7 +5,8 @@
   "params": {
     "function_calling": "native",
     "temperature": 0.3,
-    "max_tokens": 1200
+    "max_tokens": 1200,
+    "custom_params": { "provider": { "data_collection": "deny" } }
   },
   "meta": {
     "description": "Homelab and software-practices advisor. Answers from attached knowledge when it exists.",

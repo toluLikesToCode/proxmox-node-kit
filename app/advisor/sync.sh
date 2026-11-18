@@ -6,7 +6,7 @@ set -euo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
 URL=${OWUI_URL:-http://127.0.0.1:3000}
 KEY_FILE=${KEY_FILE:-/etc/open-webui-sync.env}
-TASK_MODEL=${TASK_MODEL:-deepseek/deepseek-v4.1-flash-1017}
+TASK_MODEL=${TASK_MODEL:-openai/gpt-oss-20b}
 
 KEY=$(sed -n 's/^OWUI_API_KEY=//p' "$KEY_FILE" 2>/dev/null | tail -n 1 || true)
 if [ -z "$KEY" ]; then

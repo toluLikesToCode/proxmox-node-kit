@@ -25,7 +25,7 @@ The Open WebUI container runs a custom model, Homelab Advisor, defined in `app/a
 
 - It advises one homelab owner on Proxmox, Docker and Compose, Linux, networking and DNS, backups, remote access (Tailscale, Cloudflare-style tunnels), monitoring and media servers, and on git, testing, CI, security and code review.
 - It answers from attached knowledge when there is any (the model calls Open WebUI's knowledge tools) and says when it does not know.
-- It is cheap to run. Every model call goes through OpenRouter, background calls (tags, follow-ups, autocomplete, search and retrieval queries) are off, and answers are capped in length.
+- It is cheap to run. Every model call goes through OpenRouter, the advisor asks it to skip providers that keep or train on prompts (`data_collection: deny`), background calls (tags, follow-ups, autocomplete, search and retrieval queries) are off, and answers are capped in length.
 - It is safe. It never asks for or repeats secrets, gives steps with an undo, and warns before destructive commands.
 
 What is in `app/advisor/`:

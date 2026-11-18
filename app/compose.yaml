@@ -14,7 +14,7 @@ services:
       DEFAULT_MODELS: homelab-advisor
       ENABLE_API_KEYS: "true"
       ENABLE_TITLE_GENERATION: "true"
-      TASK_MODEL_EXTERNAL: deepseek/deepseek-v4.1-flash-1017
+      TASK_MODEL_EXTERNAL: openai/gpt-oss-20b
       ENABLE_TAGS_GENERATION: "false"
       ENABLE_FOLLOW_UP_GENERATION: "false"
       ENABLE_AUTOCOMPLETE_GENERATION: "false"

@@ -39,10 +39,12 @@ check "firewall rules pass nft -c" nft -c -f "$T/guard.nft"
 check "firewall blocks the local network and the tailnet" bash -c "grep -q 'ip daddr 192.0.2.0/24 drop' '$T/guard.nft' && grep -q '100.64.0.0/10 drop' '$T/guard.nft'"
 
 # ---------- advisor config ----------
+quiet() { "$@" >/dev/null; }
 M=app/advisor/model.json; SP=app/advisor/system-prompt.md
-check "model.json is valid JSON" jq -e . "$M" >/dev/null
-check "model.json pins the base model, native function calling and a token cap" jq -e \
-  '.id == "homelab-advisor" and .base_model_id == "deepseek/deepseek-v4.1-flash-1017" and .params.function_calling == "native" and (.params.max_tokens | type == "number" and . > 0)' "$M" >/dev/null
+check "model.json is valid JSON" quiet jq -e . "$M"
+check "model.json pins the base model, native function calling and a token cap" quiet jq -e \
+  '.id == "homelab-advisor" and .base_model_id == "deepseek/deepseek-v4.1-flash-1017" and .params.function_calling == "native" and (.params.max_tokens | type == "number" and . > 0)' "$M"
+check "model.json asks OpenRouter to deny providers that keep or train on prompts" quiet jq -e '.params.custom_params.provider.data_collection == "deny"' "$M"
 check "system prompt is under 1,500 tokens (chars/4)" test "$(( $(wc -c < "$SP") / 4 ))" -lt 1500
 check "system prompt has the retrieval rule" grep -q 'Before answering a question about this homelab, call list_knowledge, then query_knowledge_files' "$SP"
 check "system prompt has a Knowledge index section" grep -q '^# Knowledge index' "$SP"
@@ -60,7 +62,7 @@ check "compose turns off background generation and sets the default model" pytho
 import yaml,sys
 e=yaml.safe_load(open("app/compose.yaml"))["services"]["open-webui"]["environment"]
 off=["ENABLE_TAGS_GENERATION","ENABLE_FOLLOW_UP_GENERATION","ENABLE_AUTOCOMPLETE_GENERATION"]
-sys.exit(0 if all(e[k]=="false" for k in off) and e["ENABLE_TITLE_GENERATION"]=="true" and e["TASK_MODEL_EXTERNAL"] and e["DEFAULT_MODELS"]=="homelab-advisor" else 1)'
+sys.exit(0 if all(e[k]=="false" for k in off) and e["ENABLE_TITLE_GENERATION"]=="true" and e["TASK_MODEL_EXTERNAL"]=="openai/gpt-oss-20b" and e["DEFAULT_MODELS"]=="homelab-advisor" else 1)'
 leaks() { grep -rEoh '[0-9]{1,3}(\.[0-9]{1,3}){3}' app README.md | grep -vE '^(127\.0\.0\.1|192\.0\.2\.[0-9]+)$'; }
 check "no stray IPv4 address in app/ or README.md" test -z "$(leaks)"
 check "no email address in app/ or README.md" bash -c '! grep -rqE "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]{2,}" app README.md'
@@ -80,7 +82,7 @@ WANT=$(jq -c --rawfile s "$SP" '[.id, .base_model_id, .params.function_calling, 
 check "sync upserts the model with the system prompt inlined" bash -c '[ "$(jq -c "select(.path == \"/api/v1/models/import\") | .body.models[0] | [.id, .base_model_id, .params.function_calling, .params.system] | tojson" "$1")" = "$2" ]' _ "$S/log" "$WANT"
 check "sync creates the prompts that are missing" bash -c '[ "$(jq -r "select(.path == \"/api/v1/prompts/create\") | .body.command" "$1" | sort | tr "\n" " ")" = "diagnose plan-change " ]' _ "$S/log"
 check "sync updates the prompt that exists" seen '.path == "/api/v1/prompts/id/p1/update" and .body.command == "review" and (.body.content | startswith("Review this"))'
-check "sync turns off background generation and sets the task model" seen '.path == "/api/v1/tasks/config/update" and .body.ENABLE_TAGS_GENERATION == false and .body.ENABLE_FOLLOW_UP_GENERATION == false and .body.ENABLE_AUTOCOMPLETE_GENERATION == false and .body.ENABLE_TITLE_GENERATION == true and .body.TASK_MODEL_EXTERNAL == "deepseek/deepseek-v4.1-flash-1017"'
+check "sync turns off background generation and sets the task model" seen '.path == "/api/v1/tasks/config/update" and .body.ENABLE_TAGS_GENERATION == false and .body.ENABLE_FOLLOW_UP_GENERATION == false and .body.ENABLE_AUTOCOMPLETE_GENERATION == false and .body.ENABLE_TITLE_GENERATION == true and .body.TASK_MODEL_EXTERNAL == "openai/gpt-oss-20b"'
 check "sync sets the default model" seen '.path == "/api/v1/configs/models" and .method == "POST" and .body.DEFAULT_MODELS == "homelab-advisor"'
 : > "$S/log"; run_sync "$S/key.env" >/dev/null 2>&1
 check "sync is idempotent: a second run creates nothing and updates all three prompts" bash -c '! jq -e "select(.path == \"/api/v1/prompts/create\")" "$1" >/dev/null && [ "$(jq -r "select(.path | test(\"^/api/v1/prompts/id/.*/update$\")) | .path" "$1" | wc -l)" -eq 3 ]' _ "$S/log"
