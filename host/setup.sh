@@ -78,6 +78,8 @@ write_files:
           ip daddr @LAN@ tcp dport 53 accept
           udp dport 67 accept
           ip daddr 100.100.100.100 accept
+          # gbrain Postgres forward on the owner's tailscale-01; the tailnet policy allows tag:agent-node only this.
+          ip daddr 100.127.66.32 tcp dport 5432 accept
           ip daddr @LAN@ drop
           ip daddr 100.64.0.0/10 drop
           ip6 daddr fc00::/7 drop
