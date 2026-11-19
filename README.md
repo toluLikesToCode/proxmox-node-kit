@@ -88,6 +88,10 @@ Open WebUI saves most settings in its database on first start, so the settings i
 
 To upgrade Open WebUI, change the image tag in `app/compose.yaml`. The last five backups are kept in `/var/backups/open-webui/`.
 
+## Telemetry
+
+After every update check, `app/telemetry.sh` posts a status to ntfy (`https://ntfy.jactus.net`, topic `advisor-telemetry`, no login): kit commit, Open WebUI version, update/sync/knowledge results, health, CPU load, memory and free disk. A change in problems also posts to `advisor-alerts`. Override or turn off with `/etc/advisor-telemetry.env` (`NTFY_URL`, `NTFY_TOKEN`, `NTFY_TOPIC`, `NTFY_ALERT_TOPIC`, `TELEMETRY=off`). Failures never fail the update.
+
 ## Tests
 
     bash tests/docker.sh

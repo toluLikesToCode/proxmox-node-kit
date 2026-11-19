@@ -291,6 +291,38 @@ OUT=$(KB_MIRROR_REMOTE="ssh://git@node/srv/x.git" KB_MIRROR_KEY="$HUB/nokey" KB_
 check "kb-mirror over ssh needs the key and the pinned host key" bash -c '[ "$1" -ne 0 ] && grep -q "no key" <<<"$2"' _ "$RC" "$OUT"
 check "kb-mirror units: nightly, persistent timer; oneshot service" bash -c 'grep -q "^OnCalendar=" host/kb-mirror.timer && grep -q "^Persistent=true" host/kb-mirror.timer && grep -q "^Type=oneshot" host/kb-mirror.service'
 
+# ---------- telemetry.sh ----------
+TL=$(mktemp -d); : > "$TL/ntfy.log"
+python3 tests/stubs/ntfy_stub.py "$TL/nport" "$TL/ntfy.log" "$TL" & NTFY_PID=$!
+stub_start
+until [ -s "$TL/nport" ]; do sleep 0.1; done
+printf 'NTFY_URL=http://127.0.0.1:%s\n' "$(cat "$TL/nport")" > "$TL/tel.env"
+git init -q "$TL/repo" && "${G[@]}" -C "$TL/repo" commit -q --allow-empty -m one; KIT=$(git -C "$TL/repo" rev-parse --short HEAD)
+tel() { env OWUI_URL="http://127.0.0.1:$(cat "$S/port")" HEALTH_URL="http://127.0.0.1:$(cat "$S/port")/health" KEY_FILE="$S/key.env" \
+        STATE_DIR="$TL/state" REPO_DIR="$TL/repo" KB_ROOT="$TL/kb" DATA_DIR="$TL" TELEMETRY_ENV="$TL/tel.env" "$@" bash app/telemetry.sh "${TARGS[@]}"; }
+posts() { jq -sc "[.[] | select($1)]" "$TL/ntfy.log"; }
+npost() { posts "$1" | jq length; }
+TARGS=(none unchanged skipped 0)
+echo TELEMETRY=off > "$TL/off.env"
+OUT=$(tel TELEMETRY_ENV="$TL/off.env" 2>&1); RC=$?
+check "telemetry with TELEMETRY=off exits 0 and sends nothing" bash -c '[ "$1" -eq 0 ] && [ -z "$2" ] && [ ! -s "$3" ]' _ "$RC" "$OUT" "$TL/ntfy.log"
+check "telemetry defaults to the owner's ntfy with no login" bash -c 'grep -q "NTFY_URL:-https://ntfy.jactus.net" app/telemetry.sh'
+tel >"$TL/out" 2>&1; RC=$?
+ST=$(posts '.topic == "advisor-telemetry" and .title == "advisor status"' | jq -c '.[0].body | fromjson')
+check "telemetry posts one status without a login: results, health, model, version and machine numbers" bash -c '[ "$1" -eq 0 ] && [ "$3" = 0 ] && jq -e --arg kit "$4" ".deploy == \"none\" and .sync == \"unchanged\" and .kb_pull == \"skipped\" and .exit == 0 and .health == \"up\" and .model == \"present\" and .kit == \$kit and (.load | test(\"^[0-9.]+ [0-9.]+ [0-9.]+$\")) and (.mem_total_mb | tonumber > 0) and (.disk_free_gb | tonumber >= 0) and (.uptime_s | tonumber > 0)" <<<"$2" >/dev/null' _ "$RC" "$ST" "$(npost '.auth != null')" "$KIT"
+printf 'NTFY_TOKEN=tk_test\n' >> "$TL/tel.env"; : > "$TL/ntfy.log"; tel >/dev/null 2>&1
+check "a token in the env file is sent as a bearer login" test "$(npost '.auth == "Bearer tk_test"')" = 1
+TARGS=(deployed failed ok 0); : > "$TL/ntfy.log"; tel >/dev/null 2>&1
+check "a failed sync raises one high-priority alert" bash -c '[ "$2" = "$(jq -nc --arg b "settings sync failed (kit $1)" "[[\"high\", \$b]]")" ]' _ "$KIT" "$(posts '.topic == "advisor-alerts"' | jq -c '[.[] | [.priority, .body]]')"
+: > "$TL/ntfy.log"; tel >/dev/null 2>&1
+check "the same problem on the next run sends no second alert" test "$(npost '.topic == "advisor-alerts"')" = 0
+TARGS=(none unchanged ok 0); : > "$TL/ntfy.log"; tel >/dev/null 2>&1
+check "the all-clear is sent once the problem is gone" test "$(posts '.topic == "advisor-alerts"' | jq -r '.[0].title')" = "Advisor OK again"
+kill "$NTFY_PID"; wait "$NTFY_PID" 2>/dev/null
+TARGS=(none unchanged skipped 0); OUT=$(tel 2>&1); RC=$?
+check "with ntfy unreachable it exits 0 and says so" bash -c '[ "$1" -eq 0 ] && grep -q "status post failed" <<<"$2"' _ "$RC" "$OUT"
+kill "$STUB_PID"
+
 # ---------- update.sh ----------
 A=$(mktemp -d); mkdir -p "$A/bin"
 # shellcheck disable=SC2016  # written for the stub to expand
@@ -308,7 +340,8 @@ cp -r app "$A/work/"
 ( cd "$A/work" && "${G[@]}" add -A && "${G[@]}" commit -qm one && git push -q origin HEAD:live )
 git clone -q -b live "$A/origin.git" "$A/deployed"
 mkdir -p "$A/data"; echo v1 > "$A/data/webui.db"
-update() { env PATH="$A/bin:$PATH" APPLY_LOG="$A/log" REPO_DIR="$A/deployed" DATA_DIR="$A/data" \
+echo TELEMETRY=off > "$A/tel-off.env"
+update() { env PATH="$A/bin:$PATH" APPLY_LOG="$A/log" REPO_DIR="$A/deployed" DATA_DIR="$A/data" TELEMETRY_ENV="$A/tel-off.env" \
           BACKUP_DIR="$A/bak" STATE_DIR="$A/state" HEALTH_TIMEOUT=0 "$@" bash app/update.sh; }
 synced() { grep -q '/api/v1/models/import' "$A/log"; }
 push_change() { ( cd "$A/work" && echo "# $1" >> app/compose.yaml && "${G[@]}" commit -qam "$1" && git push -q origin HEAD:live ); }
@@ -354,6 +387,13 @@ check "update: without the KB env file the knowledge pull is skipped" grep -q "k
 printf 'KB_REPO=ssh://git@example.invalid/x.git\n' > "$A/kb.env"
 tick KB_KEY="$A/kbkey" KB_ENV="$A/kb.env"
 check "update: the KB env file reaches the knowledge pull" grep -q "KNOWN_HOSTS must name a file" "$A/out"
+
+printf 'NTFY_URL=http://ntfy.invalid\n' > "$A/tel.env"
+: > "$A/log"; update TELEMETRY_ENV="$A/tel.env" >/dev/null 2>&1; RC=$?
+check "update: a run with no change still reports a status" bash -c "[ $RC -eq 0 ] && grep -q 'ntfy.invalid/advisor-telemetry' '$A/log' && grep -q '\"deploy\":\"none\"' '$A/log'"
+push_change five; : > "$A/log"
+update TELEMETRY_ENV="$A/tel.env" HEALTH=down >/dev/null 2>&1; RC=$?
+check "update: a rolled-back deploy is reported and still exits 1" bash -c "[ $RC -eq 1 ] && grep -q '\"deploy\":\"rolled-back\"' '$A/log' && grep -q '\"exit\":1' '$A/log'"
 
 echo; echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
