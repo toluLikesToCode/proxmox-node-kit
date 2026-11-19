@@ -9,6 +9,7 @@
 #                                     commit in this repo (default live) or a checkout directory (first install)
 #   kb-hub.sh install-gitleaks        download the pinned gitleaks, verify its sha256, install it in $KB_TOOLS/bin
 #   kb-hub.sh add-reader NAME PUBKEY  allow a read-only key: it can only run git-upload-pack on this repo
+#                                     run it as the git user (sudo -u git) and pass the bare key, 'ssh-ed25519 AAAA...', without its comment
 #   kb-hub.sh status                  main, live and the last-good list
 #   kb-hub.sh check SHA [quick|full]  run the checks only (what the hook and promote call)
 #   kb-hub.sh pre-receive             the hook body; reads "old new ref" lines on stdin
