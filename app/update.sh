@@ -14,6 +14,10 @@ STATE_DIR=${STATE_DIR:-/var/lib/open-webui-update}
 KB_KEY=${KB_KEY:-/etc/advisor-kb-deploy-key}
 KB_ROOT=${KB_ROOT:-/var/lib/open-webui-kb}
 export KB_KEY KB_ROOT
+# KB_REPO, KNOWN_HOSTS and KB_SSH_USER name the git server; the systemd unit is installed once, so they live in this file.
+KB_ENV=${KB_ENV:-/etc/advisor-kb.env}
+# shellcheck disable=SC1090  # operator-written file, path set by KB_ENV
+if [ -r "$KB_ENV" ]; then set -a; . "$KB_ENV"; set +a; fi
 COMPOSE=(docker compose -f "$REPO_DIR/app/compose.yaml")
 
 # The advisor config is not part of the deploy: a failed sync is logged, never rolled back.

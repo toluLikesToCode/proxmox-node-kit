@@ -71,7 +71,7 @@ Only what is merged to `main` and promoted to the `live` branch of the advisor-k
 
 1. Create a key pair on the node: `ssh-keygen -t ed25519 -N '' -f /etc/advisor-kb-deploy-key -C advisor-kb-readonly` (put it inside the container that runs the timer, `pct exec 402`, if `update.sh` runs there).
 2. Add `/etc/advisor-kb-deploy-key.pub` as a read-only deploy key on the advisor-kb repo.
-3. The next 15-minute check pulls, verifies and syncs. `KB_REPO` and `KNOWN_HOSTS` (a file holding the git server's host key) have no default and must be set for the pull to run; without `KB_REPO` the pull logs `kb pull skipped: KB_REPO not set` and exits 0. `KB_BRANCH`, `KB_KEY`, `KB_ROOT` and `KB_SSH_USER` override their defaults.
+3. The next 15-minute check pulls, verifies and syncs. `KB_REPO` and `KNOWN_HOSTS` (a file holding the git server's host key) have no default and must be set for the pull to run: put them (and `KB_SSH_USER`, `KB_BRANCH`) as `NAME=value` lines in `/etc/advisor-kb.env`, which `update.sh` reads on every run; without `KB_REPO` the pull logs `kb pull skipped: KB_REPO not set` and exits 0. `KB_BRANCH`, `KB_KEY`, `KB_ROOT` and `KB_SSH_USER` override their defaults.
 
 Open WebUI saves most settings in its database on first start, so the settings in `app/compose.yaml` only seed a fresh install. `sync.sh` applies the same values to an existing one.
 

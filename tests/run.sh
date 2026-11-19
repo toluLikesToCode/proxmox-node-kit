@@ -348,6 +348,12 @@ check "update: a failed sync without a new commit is logged and exits 0" bash -c
 tick
 check "update: a failed sync is retried on the next tick" synced
 git -C "$A/deployed" checkout -q app/advisor/model.json
+echo k > "$A/kbkey"
+tick KB_KEY="$A/kbkey" KB_ENV="$A/absent.env"
+check "update: without the KB env file the knowledge pull is skipped" grep -q "kb pull skipped: KB_REPO not set" "$A/out"
+printf 'KB_REPO=ssh://git@example.invalid/x.git\n' > "$A/kb.env"
+tick KB_KEY="$A/kbkey" KB_ENV="$A/kb.env"
+check "update: the KB env file reaches the knowledge pull" grep -q "KNOWN_HOSTS must name a file" "$A/out"
 
 echo; echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
