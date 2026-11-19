@@ -5,6 +5,7 @@ Knowledge bases and files are kept in memory, like the real API, with a page siz
 paging is exercised. Fault injection through the environment:
   STUB_UPLOAD_FAILS=<filename>:<n>   the first n uploads of that file answer 500 (n=99: always)
   STUB_PROCESS_STATUS=failed         processing of every upload ends in "failed"
+  STUB_CHATS=<file> / STUB_FEEDBACK=<file>   JSON served by the chat and feedback exports
 """
 import hashlib
 import json
@@ -70,6 +71,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({"status": os.environ.get("STUB_PROCESS_STATUS", "completed")})
         if u.path == "/api/v1/models/model":
             return self.reply(model)
+        exports = {"/api/v1/chats/all/db": "STUB_CHATS", "/api/v1/evaluations/feedbacks/all/export": "STUB_FEEDBACK"}
+        if u.path in exports:
+            src = os.environ.get(exports[u.path])
+            return self.reply(json.load(open(src)) if src else [])
         self.reply({"/api/v1/prompts/": prompts, "/api/v1/tasks/config": TASKS, "/api/v1/configs/models": MODELS}.get(u.path, {}))
 
     def do_DELETE(self):

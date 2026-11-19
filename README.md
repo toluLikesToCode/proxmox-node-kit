@@ -88,6 +88,16 @@ Open WebUI saves most settings in its database on first start, so the settings i
 
 To upgrade Open WebUI, change the image tag in `app/compose.yaml`. The last five backups are kept in `/var/backups/open-webui/`.
 
+## Telemetry
+
+Off unless `/etc/advisor-telemetry.env` exists (`NTFY_URL`, `NTFY_TOKEN`; optional `NTFY_TOPIC`, `NTFY_ALERT_TOPIC`, `EXPORT_HOUR`, `PART_BYTES`). With it, every update run (`app/telemetry.sh`) posts to the ntfy topic:
+
+- a status JSON: kit commit, deploy/sync/KB result, health, model, and the number of new user messages;
+- once a day after `EXPORT_HOUR` (default 3), the chats changed since the previous export as gzip NDJSON attachments, each part at most `PART_BYTES` (default 12 MB). Keys, tokens and `password: …` style values are replaced with `[removed]`, uploaded files are listed by name only, and the user is recorded as `friend`;
+- to the alert topic, a message when the set of problems changes (update failed, rollback, KB sync failed, app down) and when it clears.
+
+Telemetry failures are logged and never fail the update.
+
 ## Tests
 
     bash tests/docker.sh

@@ -20,6 +20,17 @@ KB_ENV=${KB_ENV:-/etc/advisor-kb.env}
 if [ -r "$KB_ENV" ]; then set -a; . "$KB_ENV"; set +a; fi
 COMPOSE=(docker compose -f "$REPO_DIR/app/compose.yaml")
 
+# Every run ends with one telemetry report (a no-op without /etc/advisor-telemetry.env). It runs
+# from the EXIT trap so failures and rollbacks are reported too, and it never changes the exit code.
+DEPLOY=none SYNC=unchanged KB=skipped
+# shellcheck disable=SC2317  # called by the trap
+report() {
+  local rc=$?
+  timeout 600 bash "$REPO_DIR/app/telemetry.sh" "$DEPLOY" "$SYNC" "$KB" "$rc" || echo "Telemetry failed." >&2
+  exit "$rc"
+}
+trap report EXIT
+
 # The advisor config is not part of the deploy: a failed sync is logged, never rolled back.
 # Fingerprint = advisor files + key file + the pulled knowledge manifest; empty without a key. The
 # stamp holds the fingerprint of the last successful sync, so the timer retries a failed sync and
@@ -32,8 +43,10 @@ fingerprint() {
 sync_advisor() {
   local fp; fp=$(fingerprint)
   if bash "$REPO_DIR/app/advisor/sync.sh"; then
+    SYNC=ok
     if [ -n "$fp" ]; then mkdir -p "$STATE_DIR"; echo "$fp" > "$STATE_DIR/advisor-sync.stamp"; fi
   else
+    SYNC=failed
     echo "Advisor sync failed; the deploy stands." >&2
   fi
 }
@@ -41,7 +54,9 @@ sync_advisor() {
 # The knowledge comes from the advisor-kb repo, not from this one. A failed pull keeps the previous knowledge.
 pull_kb() {
   [ -s "$KB_KEY" ] || return 0
-  bash "$REPO_DIR/app/advisor/kb-pull.sh" || echo "Knowledge pull failed; keeping the previous knowledge." >&2
+  if bash "$REPO_DIR/app/advisor/kb-pull.sh"; then KB=ok; else
+    KB=failed; echo "Knowledge pull failed; keeping the previous knowledge." >&2
+  fi
 }
 
 cd "$REPO_DIR"
@@ -73,11 +88,13 @@ git merge -q --ff-only "origin/$BRANCH"
 "${COMPOSE[@]}" pull -q
 "${COMPOSE[@]}" up -d
 if healthy; then
+  DEPLOY=deployed
   echo "Deployed ${NEW:0:8}."
   sync_advisor
   exit 0
 fi
 
+DEPLOY=rolled-back
 echo "Deploy of ${NEW:0:8} is unhealthy. Restoring ${OLD:0:8}." >&2
 "${COMPOSE[@]}" down || true
 git reset -q --hard "$OLD"

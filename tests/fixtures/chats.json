@@ -1,0 +1,102 @@
+[
+ {
+  "id": "c1",
+  "user_id": "u-friend",
+  "title": "DNS is flaky",
+  "created_at": 1400,
+  "updated_at": 2000,
+  "chat": {
+   "models": [
+    "homelab-advisor"
+   ],
+   "history": {
+    "currentId": "m3",
+    "messages": {
+     "m1": {
+      "id": "m1",
+      "parentId": null,
+      "childrenIds": [
+       "m2",
+       "m3"
+      ],
+      "role": "user",
+      "timestamp": 1500,
+      "content": "my openrouter key is sk-fixture-0123456789abcdef and password: hunter2, see https://bob:pw9@nas.lan/x",
+      "files": [
+       {
+        "type": "image",
+        "name": "screen.png",
+        "url": "data:image/png;base64,QUJDREVG"
+       }
+      ]
+     },
+     "m2": {
+      "id": "m2",
+      "parentId": "m1",
+      "childrenIds": [],
+      "role": "assistant",
+      "timestamp": 1510,
+      "model": "homelab-advisor",
+      "content": "",
+      "error": {
+       "content": "upstream timeout"
+      },
+      "done": true
+     },
+     "m3": {
+      "id": "m3",
+      "parentId": "m1",
+      "childrenIds": [],
+      "role": "assistant",
+      "timestamp": 1600,
+      "model": "homelab-advisor",
+      "content": "Check pihole.\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA\n-----END OPENSSH PRIVATE KEY-----",
+      "done": true,
+      "usage": {
+       "prompt_tokens": 900,
+       "completion_tokens": 120,
+       "cost": 0.0004
+      },
+      "sources": [
+       {
+        "source": {
+         "name": "HomeLab notes",
+         "type": "collection"
+        },
+        "metadata": [
+         {
+          "name": "Net - DNS.md"
+         }
+        ]
+       }
+      ],
+      "annotation": {
+       "rating": -1
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "id": "c2",
+  "user_id": "u-friend",
+  "title": "Old chat",
+  "created_at": 100,
+  "updated_at": 500,
+  "chat": {
+   "history": {
+    "messages": {
+     "n1": {
+      "id": "n1",
+      "parentId": null,
+      "childrenIds": [],
+      "role": "user",
+      "timestamp": 400,
+      "content": "hello"
+     }
+    }
+   }
+  }
+ }
+]

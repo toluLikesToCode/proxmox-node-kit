@@ -123,5 +123,31 @@ check "OpenRouter receives the base model and the answer cap" bash -c 'jq -e --s
 check "OpenRouter receives the system prompt" bash -c 'jq -e --rawfile s "$2" "[.messages[] | select(.role == \"system\") | .content] | any(contains(\$s | .[0:60]))" <<<"$1" >/dev/null' _ "$sent" "$SP"
 echo "upstream request: $sent" | cut -c1-600
 
+# Telemetry: a chat saved the way the UI saves one, plus a thumbs-down, exported through the real API.
+post() { curl -fsS -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$OWUI_URL$1" -d "$2"; }
+cid=$(post /api/v1/chats/new '{"chat": {"title": "DNS is flaky", "models": ["homelab-advisor"], "history": {"currentId": "m2", "messages": {
+  "m1": {"id": "m1", "parentId": null, "childrenIds": ["m2"], "role": "user", "timestamp": 1700000000, "content": "pihole drops; password: hunter2"},
+  "m2": {"id": "m2", "parentId": "m1", "childrenIds": [], "role": "assistant", "timestamp": 1700000005, "model": "homelab-advisor", "content": "Check the DNS host.",
+         "done": true, "usage": {"prompt_tokens": 10, "completion_tokens": 5}, "sources": [{"source": {"name": "HomeLab notes"}, "metadata": [{"name": "Net - One.md"}]}],
+         "annotation": {"rating": -1}}}}}}' | jq -r .id)
+post /api/v1/evaluations/feedback "$(jq -nc --arg c "$cid" '{type: "rating", data: {rating: -1, model_id: "homelab-advisor", reason: "Inaccurate", comment: "wrong host"}, meta: {chat_id: $c, message_id: "m2"}}')" >/dev/null
+T=$(mktemp -d); mkdir -p "$T/att"; : > "$T/ntfy.log"
+python3 tests/stubs/ntfy_stub.py "$T/port" "$T/ntfy.log" "$T/att" & NTFY_PID=$!
+until [ -s "$T/port" ]; do sleep 0.1; done
+printf 'NTFY_URL=http://127.0.0.1:%s\nNTFY_TOKEN=tk_it\nEXPORT_HOUR=0\n' "$(cat "$T/port")" > "$T/tel.env"
+mkdir -p "$T/state"; echo 1699999999 > "$T/state/telemetry.last"
+TELEMETRY_ENV="$T/tel.env" KEY_FILE="$K/key.env" STATE_DIR="$T/state" HEALTH_URL="$OWUI_URL/health" REPO_DIR="$T" \
+  bash app/telemetry.sh none ok ok 0 >"$T/out" 2>&1; RC=$?
+st=$(jq -sc '[.[] | select(.title == "advisor status")][0].body | fromjson' "$T/ntfy.log")
+check "telemetry against the real Open WebUI: health up, advisor present, one new user message" bash -c '[ "$1" -eq 0 ] && jq -e ".health == \"up\" and .model == \"present\" and .messages == 1" <<<"$2" >/dev/null' _ "$RC" "$st"
+chat=$(gunzip -c "$T"/att/*.gz | jq -c --arg c "$cid" 'select(.id == $c)')
+check "the real export holds the chat with its sources, usage, rating, feedback comment and the password removed" bash -c 'jq -e "
+  .title == \"DNS is flaky\" and .user == \"friend\" and [.messages[].role] == [\"user\",\"assistant\"]
+  and .messages[0].content == \"pihole drops; password: [removed]\" and .messages[1].sources == [\"HomeLab notes\",\"Net - One.md\"]
+  and .messages[1].usage.completion_tokens == 5 and .messages[1].rating == -1
+  and (.feedback | length) == 1 and .feedback[0].comment == \"wrong host\" and .feedback[0].message == \"m2\"" <<<"$1" >/dev/null' _ "$chat"
+[ -n "$chat" ] || { cat "$T/out"; gunzip -c "$T"/att/*.gz 2>/dev/null | head -c 2000; }
+kill "$NTFY_PID"
+
 echo; echo "$PASS passed, $FAIL failed ($IMAGE)"
 [ "$FAIL" -eq 0 ]

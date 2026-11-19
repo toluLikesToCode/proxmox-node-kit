@@ -291,6 +291,61 @@ OUT=$(KB_MIRROR_REMOTE="ssh://git@node/srv/x.git" KB_MIRROR_KEY="$HUB/nokey" KB_
 check "kb-mirror over ssh needs the key and the pinned host key" bash -c '[ "$1" -ne 0 ] && grep -q "no key" <<<"$2"' _ "$RC" "$OUT"
 check "kb-mirror units: nightly, persistent timer; oneshot service" bash -c 'grep -q "^OnCalendar=" host/kb-mirror.timer && grep -q "^Persistent=true" host/kb-mirror.timer && grep -q "^Type=oneshot" host/kb-mirror.service'
 
+# ---------- telemetry.sh ----------
+TL=$(mktemp -d); mkdir -p "$TL/att"; : > "$TL/ntfy.log"
+python3 tests/stubs/ntfy_stub.py "$TL/nport" "$TL/ntfy.log" "$TL/att" & NTFY_PID=$!
+stub_start STUB_CHATS="$PWD/tests/fixtures/chats.json" STUB_FEEDBACK="$PWD/tests/fixtures/feedback.json"
+until [ -s "$TL/nport" ]; do sleep 0.1; done
+printf 'NTFY_URL=http://127.0.0.1:%s\nNTFY_TOKEN=tk_test\nEXPORT_HOUR=0\n' "$(cat "$TL/nport")" > "$TL/tel.env"
+sed 's/^EXPORT_HOUR=0$/EXPORT_HOUR=24/' "$TL/tel.env" > "$TL/tel24.env"
+git init -q "$TL/repo" && "${G[@]}" -C "$TL/repo" commit -q --allow-empty -m one; KIT=$(git -C "$TL/repo" rev-parse --short HEAD)
+tel() { env OWUI_URL="http://127.0.0.1:$(cat "$S/port")" HEALTH_URL="http://127.0.0.1:$(cat "$S/port")/health" KEY_FILE="$S/key.env" \
+        STATE_DIR="$TL/state" REPO_DIR="$TL/repo" KB_ROOT="$TL/kb" TELEMETRY_ENV="$TL/tel.env" "$@" bash app/telemetry.sh "${TARGS[@]}"; }
+posts() { jq -sc "[.[] | select($1)]" "$TL/ntfy.log"; }
+npost() { posts "$1" | jq length; }
+TARGS=(none unchanged skipped 0)
+OUT=$(tel TELEMETRY_ENV="$TL/absent.env" 2>&1); RC=$?
+check "telemetry without its env file exits 0 and sends nothing" bash -c '[ "$1" -eq 0 ] && [ -z "$2" ] && [ ! -s "$3" ] && [ ! -s "$4" ]' _ "$RC" "$OUT" "$TL/ntfy.log" "$S/log"
+mkdir -p "$TL/state"; echo 1000 > "$TL/state/telemetry.last"
+tel >"$TL/out" 2>&1; RC=$?
+ST=$(posts '.topic == "advisor-telemetry" and .title == "advisor status"' | jq -c '.[0].body | fromjson')
+check "telemetry posts a status with the token, results, health, model and message count" bash -c '[ "$1" -eq 0 ] && [ "$3" = 0 ] && jq -e --arg kit "$4" ".deploy == \"none\" and .sync == \"unchanged\" and .kb_pull == \"skipped\" and .exit == 0 and .health == \"up\" and .model == \"present\" and .messages == 1 and .kit == \$kit" <<<"$2" >/dev/null' _ "$RC" "$ST" "$(npost '.auth != "Bearer tk_test"')" "$KIT"
+P=$(posts '.filename != null')
+check "telemetry sends the chats once, as one gzipped part named for the day" bash -c '[ "$(jq length <<<"$1")" = 1 ] && [ "$(jq -r ".[0].filename" <<<"$1")" = "chats-$(date +%F)-1-of-1.ndjson.gz" ] && [ "$(jq -r ".[0].title" <<<"$1")" = "advisor chats" ]' _ "$P"
+gunzip -c "$TL/att/chats-$(date +%F)-1-of-1.ndjson.gz" > "$TL/chats.ndjson" 2>/dev/null
+C1=$(jq -c 'select(.id == "c1")' "$TL/chats.ndjson")
+check "the export holds both chats, tagged friend, with no user id" bash -c '[ "$(wc -l < "$1")" -eq 2 ] && ! grep -q u-friend "$1" && [ "$(jq -r .user "$1" | sort -u)" = friend ]' _ "$TL/chats.ndjson"
+check "the export keeps answers in time order with the error, regeneration, sources, usage and rating" bash -c 'jq -e "[.messages[].id] == [\"m1\",\"m2\",\"m3\"] and .messages[0].children == [\"m2\",\"m3\"] and .messages[1].error.content == \"upstream timeout\" and .messages[2].sources == [\"HomeLab notes\",\"Net - DNS.md\"] and .messages[2].usage.cost == 0.0004 and .messages[2].rating == -1" <<<"$1" >/dev/null' _ "$C1"
+check "the export joins the feedback comment for that chat only" bash -c 'jq -e ".feedback == [{message: \"m3\", rating: -1, reason: \"Inaccurate\", comment: \"wrong host\", created_at: 1700}]" <<<"$1" >/dev/null' _ "$C1"
+check "the export keeps upload names only" bash -c 'jq -e ".messages[0].files == [\"screen.png\"]" <<<"$1" >/dev/null && ! grep -q base64 <<<"$1"' _ "$C1"
+check "the export swaps keys, passwords, URL logins and private keys for [removed]" bash -c '! grep -qE "sk-fixture|hunter2|bob:pw9|BEGIN OPENSSH|b3BlbnNzaA" <<<"$1" && jq -e "(.messages[0].content | test(\"key is \\\\[removed\\\\] and password: \\\\[removed\\\\]\")) and (.messages[0].content | contains(\"https://[removed]@nas.lan/x\")) and (.messages[2].content | startswith(\"Check pihole.\"))" <<<"$1" >/dev/null' _ "$C1"
+: > "$TL/ntfy.log"; tel >/dev/null 2>&1
+check "a second run the same day posts a status but no chats" bash -c '[ "$1" = 1 ] && [ "$2" = 0 ]' _ "$(npost '.title == "advisor status"')" "$(npost '.filename != null')"
+echo 1999-01-01 > "$TL/state/telemetry.export-day"; : > "$TL/ntfy.log"; tel >/dev/null 2>&1
+check "the next day repeats the previous export once, in case the collector missed it" bash -c '[ "$2" = 1 ] && [ "$(cat "$1/telemetry.export-day")" = "$(date +%F)" ] && [ "$(cat "$1/telemetry.export-since-prev")" = 2000 ]' _ "$TL/state" "$(npost '.filename != null')"
+echo 1999-01-01 > "$TL/state/telemetry.export-day"; : > "$TL/ntfy.log"; tel >/dev/null 2>&1
+check "the day after sends only chats changed since (none here)" test "$(npost '.filename != null')" = 0
+rm -f "$TL/state/telemetry.export-"* "$TL/att/"*; : > "$TL/ntfy.log"; tel PART_BYTES=1200 >/dev/null 2>&1
+check "a big export is split into parts that each stay under the size limit and add up to every chat" bash -c '
+  [ "$2" -ge 2 ] && [ "$3" = true ] || exit 1
+  for f in "$1"/*.gz; do gunzip -c "$f"; done | jq -s "map(.id) | sort == [\"c1\",\"c2\"]" | grep -qx true' _ "$TL/att" "$(npost '.filename != null')" "$(posts '.filename != null' | jq 'all(.[]; .bytes < 15000000)')"
+rm -f "$TL/state/telemetry.export-"*; : > "$TL/ntfy.log"; tel TELEMETRY_ENV="$TL/tel24.env" >/dev/null 2>&1
+check "no export before EXPORT_HOUR" test "$(npost '.filename != null')" = 0
+TARGS=(deployed failed ok 0); : > "$TL/ntfy.log"; tel TELEMETRY_ENV="$TL/tel24.env" >/dev/null 2>&1
+check "a failed sync raises one high-priority alert" bash -c '[ "$2" = "$(jq -nc --arg b "settings sync failed (kit $1)" "[[\"high\", \$b]]")" ]' _ "$KIT" "$(posts '.topic == "advisor-alerts"' | jq -c '[.[] | [.priority, .body]]')"
+: > "$TL/ntfy.log"; tel TELEMETRY_ENV="$TL/tel24.env" >/dev/null 2>&1
+check "the same problem on the next run sends no second alert" test "$(npost '.topic == "advisor-alerts"')" = 0
+TARGS=(none unchanged ok 0); : > "$TL/ntfy.log"; tel TELEMETRY_ENV="$TL/tel24.env" >/dev/null 2>&1
+check "the all-clear is sent once the problem is gone" test "$(posts '.topic == "advisor-alerts"' | jq -r '.[0].title')" = "Advisor OK again"
+kill "$NTFY_PID"; : > "$TL/ntfy.log"
+python3 tests/stubs/ntfy_stub.py "$TL/nport2" "$TL/ntfy.log" "$TL/att" & NTFY_PID=$!
+until [ -s "$TL/nport2" ]; do sleep 0.1; done; kill "$NTFY_PID"; wait "$NTFY_PID" 2>/dev/null
+rm -f "$TL/state/telemetry.export-"*; echo 1234 > "$TL/state/telemetry.last"
+printf 'NTFY_URL=http://127.0.0.1:%s\nNTFY_TOKEN=tk_test\nEXPORT_HOUR=0\n' "$(cat "$TL/nport2")" > "$TL/tel.env"
+tel >"$TL/out" 2>&1; RC=$?
+check "with ntfy unreachable it exits 0 and keeps its state for a retry" bash -c '[ "$1" -eq 0 ] && [ "$(cat "$2/telemetry.last")" = 1234 ] && [ ! -e "$2/telemetry.export-day" ] && grep -q "status post failed" "$3"' _ "$RC" "$TL/state" "$TL/out"
+kill "$STUB_PID"
+
 # ---------- update.sh ----------
 A=$(mktemp -d); mkdir -p "$A/bin"
 # shellcheck disable=SC2016  # written for the stub to expand
@@ -354,6 +409,13 @@ check "update: without the KB env file the knowledge pull is skipped" grep -q "k
 printf 'KB_REPO=ssh://git@example.invalid/x.git\n' > "$A/kb.env"
 tick KB_KEY="$A/kbkey" KB_ENV="$A/kb.env"
 check "update: the KB env file reaches the knowledge pull" grep -q "KNOWN_HOSTS must name a file" "$A/out"
+
+printf 'NTFY_URL=http://ntfy.invalid\nNTFY_TOKEN=t\nEXPORT_HOUR=24\n' > "$A/tel.env"
+: > "$A/log"; update TELEMETRY_ENV="$A/tel.env" >/dev/null 2>&1; RC=$?
+check "update: a run with no change still reports a status to telemetry" bash -c "[ $RC -eq 0 ] && grep -q 'ntfy.invalid/advisor-telemetry' '$A/log' && grep -q '\"deploy\":\"none\"' '$A/log'"
+push_change five; : > "$A/log"
+update TELEMETRY_ENV="$A/tel.env" HEALTH=down >/dev/null 2>&1; RC=$?
+check "update: a rolled-back deploy is reported to telemetry and still exits 1" bash -c "[ $RC -eq 1 ] && grep -q '\"deploy\":\"rolled-back\"' '$A/log' && grep -q '\"exit\":1' '$A/log'"
 
 echo; echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
