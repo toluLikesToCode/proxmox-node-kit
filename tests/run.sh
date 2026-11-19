@@ -44,7 +44,7 @@ quiet() { "$@" >/dev/null; }
 M=app/advisor/model.json; SP=app/advisor/system-prompt.md
 check "model.json is valid JSON" quiet jq -e . "$M"
 check "model.json pins the base model, native function calling and a token cap" quiet jq -e \
-  '.id == "homelab-advisor" and .base_model_id == "deepseek/deepseek-v4.1-flash-1017" and .params.function_calling == "native" and (.params.max_tokens | type == "number" and . > 0)' "$M"
+  '.id == "homelab-advisor" and .base_model_id == "z-ai/glm-5.3-flash" and .params.function_calling == "native" and (.params.max_tokens | type == "number" and . > 0)' "$M"
 check "model.json asks OpenRouter to deny providers that keep or train on prompts" quiet jq -e '.params.custom_params.provider.data_collection == "deny"' "$M"
 check "system prompt is under 1,500 tokens (chars/4)" test "$(( $(wc -c < "$SP") / 4 ))" -lt 1500
 check "system prompt has the retrieval rule" grep -q 'Before answering anything about this homelab, call list_knowledge once, then query_knowledge_files' "$SP"
